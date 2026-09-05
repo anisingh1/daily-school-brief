@@ -90,6 +90,14 @@ Then sends the brief as a push notification.
    read in step 4) from both sources and use your own judgment to
    extract (the content is unstructured free text - don't pattern-match
    on fixed keywords):
+
+   The child this brief is for is **Aviraj**. Whenever a message names
+   him specifically (rather than just addressing the class in general),
+   call that out prominently at the very top of the brief (e.g. prefix
+   it with "⭐ For Aviraj:") - a task or note addressed to him by name
+   is more important than a generic class-wide notice and should stand
+   out, not get buried among the class-wide items below.
+
    - **Homework**: any assignment, reading, or task mentioned for the
      child to do.
    - **Tomorrow's agenda**: events, special activities, holidays, timing
@@ -102,7 +110,14 @@ Then sends the brief as a push notification.
      much as something posted today - the portal archive is complete,
      so don't assume only recent messages matter.
    - **Dress code**: any uniform/dress instructions that apply tomorrow
-     (e.g. "sports day, wear house colors", "PE kit tomorrow").
+     (e.g. "sports day, wear house colors", "PE kit tomorrow"). Also
+     apply this fixed weekly schedule regardless of what the scraped
+     messages say (it isn't sourced from the portal/WhatsApp - it's a
+     standing fact about this child's week): swimming is every Tuesday
+     and skating is every Thursday. When today (IST) is Monday, include
+     a reminder to pack swimming dress for tomorrow. When today (IST)
+     is Wednesday, include a reminder to pack skating shoes for
+     tomorrow.
    - **Other reminders**: anything else worth a parent's attention (fee
      due dates, forms to sign, items to bring) that doesn't fit the
      above.
