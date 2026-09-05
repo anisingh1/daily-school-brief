@@ -1675,3 +1675,759 @@ and `WHATSAPP_DRIVE_FILE_ID` mention.
 Commit all changes from Tasks 11-14 (or commit incrementally per task,
 whichever this session already did) with descriptive messages, normal
 `git add`/`git commit`/`git push`, no force-push, no amend.
+
+---
+
+## Addendum 2: Month-start cutoff replaces the persisted cursor; PDFs read directly
+
+See the spec's "Month-start cutoff, not a persisted cursor" section for
+full rationale. Summary: the Tasks 11-14 cursor design had a real flaw —
+content posted once (e.g. a monthly planner PDF posted on day 1,
+containing information relevant to day 5) would drop out of
+consideration forever once the cursor advanced past the day it was
+posted, even though it had already been fetched/downloaded once. Fix:
+drop the persisted cursor entirely; the orchestrated pipeline always
+uses a fixed "2 days before start of current month" cutoff, since the
+portal page and WhatsApp Drive log both already retain their own full
+history and re-fetching the whole month is cheap. The only real cost to
+avoid repeating - downloading the same PDF attachment every day - is
+solved locally with a skip-if-already-downloaded check, not a cursor.
+Separately: portal attachments are now downloaded in the orchestrated
+pipeline too (previously `download_attachments=False`), and the skill
+`Read`s them directly, since homework/agenda/dress-code details are
+often inside the PDF, not the message body text.
+
+### Task 15: Replace `drive_state.py` with `cutoff.py`; enable + dedupe PDF downloads
+
+**Files:**
+- Create: `cutoff.py`
+- Delete: `drive_state.py`
+- Test: Create `tests/test_cutoff.py`; Delete `tests/test_drive_state.py`
+- Modify: `scrape_udt.py`
+- Modify: `tests/test_scrape_udt.py`
+- Modify: `daily_brief.py`
+- Modify: `tests/test_daily_brief.py`
+
+- [ ] **Step 1: Write the failing tests for `cutoff.py`**
+
+Create `tests/test_cutoff.py`:
+
+```python
+from datetime import datetime
+
+import cutoff
+
+
+def test_month_anchor_is_two_days_before_month_start():
+    today = datetime(2026, 9, 15, 12, 30)
+    result = cutoff.month_anchor(today)
+    assert result == datetime(2026, 8, 30, 0, 0, 0)
+
+
+def test_month_anchor_handles_january_rollover():
+    today = datetime(2026, 1, 10)
+    result = cutoff.month_anchor(today)
+    assert result == datetime(2025, 12, 30, 0, 0, 0)
+
+
+def test_compute_cutoff_returns_month_anchor():
+    assert cutoff.compute_cutoff() == cutoff.month_anchor()
+```
+
+Delete `tests/test_drive_state.py` (its tests are superseded — there's no
+more persisted state to test).
+
+- [ ] **Step 2: Run the new test to verify it fails**
+
+Run: `.venv/bin/python -m pytest tests/test_cutoff.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'cutoff'`
+
+- [ ] **Step 3: Create `cutoff.py`, delete `drive_state.py`**
+
+Create `cutoff.py`:
+
+```python
+"""
+Computes the cutoff used by the orchestrated daily-brief pipeline
+(daily_brief.py) for both the portal and WhatsApp fetchers: always 2 days
+before the start of the current calendar month.
+
+The portal's activity page and the WhatsApp Drive log both already
+retain their own full history (nothing is deleted), so there's no need
+to persist a "last run" cursor between runs - re-fetching and
+re-filtering the whole month is cheap. The only genuinely expensive
+thing to avoid repeating is downloading the same PDF attachment twice;
+that's handled separately in scrape_udt.py by skipping a download if the
+target file already exists on disk.
+
+Using "start of month minus 2 days" (rather than exactly day 1) gives
+slack for a message posted right at the month boundary and guards
+against clock/timezone edge cases.
+"""
+
+from datetime import datetime, timedelta
+
+
+def month_anchor(today: datetime | None = None) -> datetime:
+    """2 days before the start of the current calendar month."""
+    if today is None:
+        today = datetime.now()
+    month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start - timedelta(days=2)
+
+
+def compute_cutoff() -> datetime:
+    return month_anchor()
+```
+
+Delete `drive_state.py` entirely — it's fully superseded by `cutoff.py`.
+
+- [ ] **Step 4: Run the new test to verify it passes**
+
+Run: `.venv/bin/python -m pytest tests/test_cutoff.py -v`
+Expected: PASS (3 tests)
+
+- [ ] **Step 5: Write the failing tests for PDF dedupe in `scrape_udt.py`**
+
+Add to `tests/test_scrape_udt.py`:
+
+```python
+def test_download_message_attachments_skips_already_downloaded_file(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+    existing_file = tmp_path / "Homework.pdf"
+    existing_file.write_bytes(b"old content")
+
+    class FakeViewerResponse:
+        text = 'var file_path = "http://example.com/files/homework.pdf";'
+
+    class FakeSession:
+        def __init__(self):
+            self.get_calls = []
+
+        def get(self, url):
+            self.get_calls.append(url)
+            return FakeViewerResponse()
+
+    session = FakeSession()
+    messages = [{"attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+
+    scrape_udt.download_message_attachments(session, messages)
+
+    assert messages[0]["attachments"][0]["saved_as"] == str(existing_file)
+    assert messages[0]["attachments"][0]["note"] == "Already downloaded"
+    assert existing_file.read_bytes() == b"old content"
+    assert len(session.get_calls) == 1
+
+
+def test_download_message_attachments_downloads_new_file(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+
+    class FakeViewerResponse:
+        text = 'var file_path = "http://example.com/files/homework.pdf";'
+
+    class FakeFileResponse:
+        content = b"pdf bytes"
+
+    class FakeSession:
+        def get(self, url):
+            if "viewer" in url:
+                return FakeViewerResponse()
+            return FakeFileResponse()
+
+    messages = [{"attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+
+    scrape_udt.download_message_attachments(FakeSession(), messages)
+
+    saved_path = tmp_path / "Homework.pdf"
+    assert saved_path.exists()
+    assert saved_path.read_bytes() == b"pdf bytes"
+    assert messages[0]["attachments"][0]["saved_as"] == str(saved_path)
+```
+
+- [ ] **Step 6: Run the new tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_scrape_udt.py -v`
+Expected: FAIL — `AssertionError` on the "skips already downloaded"
+test's `len(session.get_calls) == 1` (current code always makes 2 calls,
+fetching the file even when it already exists on disk), since dedupe
+doesn't exist yet.
+
+- [ ] **Step 7: Add dedupe to `download_message_attachments`**
+
+Replace `download_message_attachments` in `scrape_udt.py` with:
+
+```python
+def download_message_attachments(session, messages: list[dict]) -> None:
+    for m in messages:
+        for att in m["attachments"]:
+            href = att["href"]
+            if not href:
+                continue
+            viewer_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+            try:
+                viewer_resp = session.get(viewer_url)
+                match = FILE_PATH_RE.search(viewer_resp.text)
+                if not match:
+                    att["saved_as"] = None
+                    att["note"] = "Could not find file_path in viewer page"
+                    continue
+
+                file_url = match.group(1).replace("\\/", "/")
+                ext = ""
+                if "." in file_url.rsplit("/", 1)[-1]:
+                    ext = "." + file_url.rsplit(".", 1)[-1]
+                safe_name = re.sub(r"[^\w\-. ]", "_", att["name"]) + ext
+                dest_path = PDF_DIR / safe_name
+
+                if dest_path.exists():
+                    att["saved_as"] = str(dest_path)
+                    att["source_url"] = file_url
+                    att["note"] = "Already downloaded"
+                    continue
+
+                file_resp = session.get(file_url)
+                dest_path.write_bytes(file_resp.content)
+                att["saved_as"] = str(dest_path)
+                att["source_url"] = file_url
+            except Exception as e:
+                att["saved_as"] = None
+                att["note"] = f"Download failed: {e}"
+```
+
+This drops the old content-type-based extension sniffing (which required
+fetching the file first just to inspect its `content-type` header) in
+favor of a URL-based extension guess alone, computed *before* deciding
+whether to download at all — this is what makes the dedupe check
+possible without an extra network round-trip for files that already
+exist.
+
+- [ ] **Step 8: Run the full suite to verify everything passes**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests, including the 2 new dedupe tests and the 3
+new `test_cutoff.py` tests)
+
+- [ ] **Step 9: Write the failing test for `daily_brief.py`'s new wiring**
+
+Replace `tests/test_daily_brief.py` in full with:
+
+```python
+import json
+
+import daily_brief
+
+
+def test_gather_captures_portal_error(monkeypatch):
+    def failing_fetch(**kwargs):
+        raise RuntimeError("login failed")
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["error"] == "RuntimeError: login failed"
+    assert result["portal"]["messages"] == []
+    assert result["whatsapp"]["error"] is None
+    assert result["whatsapp"]["messages"] == []
+
+
+def test_gather_returns_messages_on_success(monkeypatch):
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"title": "x"}])
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [{"text": "y"}])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["messages"] == [{"title": "x"}]
+    assert result["portal"]["error"] is None
+    assert result["whatsapp"]["messages"] == [{"text": "y"}]
+    assert result["whatsapp"]["error"] is None
+
+
+def test_gather_captures_whatsapp_error(monkeypatch):
+    def failing_fetch(**kwargs):
+        raise RuntimeError("drive unreachable")
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", failing_fetch)
+
+    result = daily_brief.gather()
+
+    assert result["whatsapp"]["error"] == "RuntimeError: drive unreachable"
+    assert result["portal"]["error"] is None
+
+
+def test_gather_downloads_portal_attachments_with_shared_cutoff(monkeypatch):
+    calls = {}
+
+    def fake_fetch(**kwargs):
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", fake_fetch)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    daily_brief.gather()
+
+    assert calls["download_attachments"] is True
+    assert calls["cutoff"] == "fixed-cutoff"
+
+
+def test_run_writes_output_file(monkeypatch, tmp_path):
+    fixed_result = {
+        "portal": {"messages": [], "error": None},
+        "whatsapp": {"messages": [], "error": None},
+    }
+    monkeypatch.setattr(daily_brief, "gather", lambda: fixed_result)
+    out_path = tmp_path / "out.json"
+    monkeypatch.setattr(daily_brief, "OUTPUT_PATH", out_path)
+
+    result = daily_brief.run()
+
+    assert out_path.exists()
+    assert json.loads(out_path.read_text()) == result == fixed_result
+```
+
+- [ ] **Step 10: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_daily_brief.py -v`
+Expected: FAIL — `AttributeError` (`daily_brief` has no attribute
+`compute_cutoff`; it currently imports `compute_cutoff`/`save_last_run`
+from `drive_state`, which this task deletes).
+
+- [ ] **Step 11: Update `daily_brief.py`**
+
+Replace the full contents with:
+
+```python
+"""
+Gathers filtered messages from the school portal and the WhatsApp log,
+and writes a single JSON envelope for the daily-school-brief skill to
+read and turn into a categorized brief.
+
+Each source is best-effort: if one fails, its `error` field is set and
+`messages` is empty, so the skill can still produce a partial brief
+rather than nothing.
+
+Uses a fixed month-start cutoff (see cutoff.py) rather than a persisted
+cursor: the portal and WhatsApp log both already retain their own full
+history, so re-fetching and re-filtering the whole month every run is
+cheap and guarantees a start-of-month monthly planner PDF - or anything
+else posted earlier in the month - is never missed, no matter how many
+days later it becomes relevant. Portal attachments are downloaded (with
+already-downloaded files skipped) so the skill can read PDF content
+directly.
+
+USAGE:
+    python daily_brief.py
+"""
+
+import json
+from pathlib import Path
+from typing import Any, TypedDict
+
+from cutoff import compute_cutoff
+from fetch_whatsapp import fetch_recent_whatsapp_messages
+from scrape_udt import fetch_recent_messages
+
+OUTPUT_PATH = Path(__file__).parent / "output" / "daily_brief_input.json"
+
+
+class SourceResult(TypedDict):
+    messages: list[Any]
+    error: str | None
+
+
+def gather() -> dict[str, SourceResult]:
+    cutoff = compute_cutoff()
+    result: dict[str, SourceResult] = {
+        "portal": {"messages": [], "error": None},
+        "whatsapp": {"messages": [], "error": None},
+    }
+
+    try:
+        result["portal"]["messages"] = fetch_recent_messages(cutoff=cutoff, download_attachments=True)
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
+        result["portal"]["error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(cutoff=cutoff)
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
+        result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
+
+    return result
+
+
+def run():
+    data = gather()
+    OUTPUT_PATH.parent.mkdir(exist_ok=True)
+    OUTPUT_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    print(f"Wrote {OUTPUT_PATH}")
+    return data
+
+
+if __name__ == "__main__":
+    run()
+```
+
+Note: this drops the `save_last_run` call and the "only advance the
+cursor when both sources succeed" logic entirely — there's no cursor to
+advance anymore.
+
+- [ ] **Step 12: Run the full suite to verify everything passes**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests across every file)
+
+- [ ] **Step 13: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend). Make sure `git add` picks up the
+deletion of `drive_state.py` and `tests/test_drive_state.py` (use `git
+add -A` or explicitly `git rm` them if they don't show up in a plain
+`git add .`).
+
+---
+
+### Task 16: Skill reads PDFs directly; `google_drive.py` reverts to read-only; docs updated
+
+**Files:**
+- Modify: `.claude/skills/daily-school-brief/SKILL.md`
+- Modify: `google_drive.py`
+- Modify: `.env.example`
+- Modify: `README.md`
+
+- [ ] **Step 1: Update the skill to read PDF attachments**
+
+Replace the full contents of `.claude/skills/daily-school-brief/SKILL.md`
+with:
+
+```markdown
+---
+name: daily-school-brief
+description: Generate the daily school brief (homework, tomorrow's agenda, dress code, other reminders) from the school portal and WhatsApp group logs, and push a notification with it. Use when asked to run or generate the daily school brief, or on the scheduled evening trigger.
+---
+
+# Daily School Brief
+
+## What this does
+
+Combines two message sources - the school web portal and the school
+WhatsApp group (captured via phone automation into a Google Drive file)
+- covering everything since the start of the current calendar month, and
+produces a short brief covering:
+
+- Homework
+- Tomorrow's school agenda (events, holidays, notices)
+- Tomorrow's dress code
+- Other reminders
+
+Then sends the brief as a push notification.
+
+## Steps
+
+1. From the project root, run:
+
+   ```bash
+   python daily_brief.py
+   ```
+
+   The project root is the directory containing `daily_brief.py`,
+   `scrape_udt.py`, and `fetch_whatsapp.py`. If you're not already
+   there (e.g. in a fresh clone on a scheduled cloud routine), `cd`
+   into it first before running the command.
+
+   This writes `output/daily_brief_input.json` with two sections,
+   `portal` and `whatsapp`, each having `messages` (a list) and `error`
+   (a string or null). Portal messages may include an `attachments`
+   list; a downloaded attachment has a `saved_as` local file path.
+
+   If `python daily_brief.py` fails to run (crashes, `python` not
+   found, etc.) or `output/daily_brief_input.json` does not exist
+   afterward, don't stop silently - send a push notification saying
+   the daily brief couldn't be generated, including a short reason if
+   one is available, and stop there.
+
+2. Read `output/daily_brief_input.json` (path relative to the project
+   root from step 1 - this only works if you're actually in that
+   directory when you run step 1).
+
+3. For each portal message that has an attachment with a `saved_as`
+   path, `Read` that file directly (Claude Code's `Read` tool handles
+   PDFs natively). Homework, agenda, and dress-code details are often
+   inside the document itself - a monthly planner PDF, for instance -
+   rather than in the message body text, so don't rely on the body
+   text alone when an attachment is present.
+
+4. For each source with a non-null `error`, note it as a warning to
+   include at the top of the brief (e.g. "couldn't reach school
+   portal") - a failure in one source should not stop you from using
+   the other source's messages.
+
+5. If both sources have zero messages and no errors, the brief is just:
+   "Nothing new from the school portal or WhatsApp group this month."
+
+6. Otherwise, read through all messages (and any attachment content
+   read in step 3) from both sources and use your own judgment to
+   extract (the content is unstructured free text - don't pattern-match
+   on fixed keywords):
+   - **Homework**: any assignment, reading, or task mentioned for the
+     child to do.
+   - **Tomorrow's agenda**: events, special activities, holidays, timing
+     changes, or notices that apply to tomorrow specifically (use
+     today's date in IST - India Standard Time, UTC+5:30, the school's
+     timezone - to work out what "tomorrow" refers to; do not use the
+     local timezone of the machine or sandbox running this skill).
+     Content posted earlier in the month (e.g. a monthly planner) that
+     happens to apply to tomorrow counts just as much as something
+     posted today.
+   - **Dress code**: any uniform/dress instructions that apply tomorrow
+     (e.g. "sports day, wear house colors", "PE kit tomorrow").
+   - **Other reminders**: anything else worth a parent's attention (fee
+     due dates, forms to sign, items to bring) that doesn't fit the
+     above.
+   Omit a section entirely if there's nothing for it, rather than
+   forcing an empty slot.
+
+7. Compose the brief as plain text with short section headers. This is
+   a draft/internal step - it's fine for this draft to span multiple
+   lines and sections.
+
+8. Condense that draft into the actual notification message: the
+   PushNotification tool requires a single line of plain text with no
+   markdown formatting. Send it with `status: "proactive"`, `message`
+   = the condensed brief. Mobile OSes truncate long notifications, so
+   keep the single line under ~200 characters where possible - lead
+   with the most time-sensitive items (tomorrow's dress code, homework
+   due tomorrow) first, since anything after that point may get cut
+   off if the full brief would run longer.
+```
+
+- [ ] **Step 2: Sanity-check the frontmatter still parses**
+
+Run: `.venv/bin/python -c "import yaml; print(yaml.safe_load(open('.claude/skills/daily-school-brief/SKILL.md').read().split('---')[1]))"`
+Expected: prints a dict with `name`/`description` keys, no errors. (If
+`yaml` isn't installed in the venv, `.venv/bin/pip install pyyaml` first
+just for this check — it's not a project dependency, only used here to
+validate the frontmatter.)
+
+- [ ] **Step 3: Revert `google_drive.py` to read-only, remove dead code**
+
+Nothing in the codebase writes to Google Drive anymore (there's no more
+state file to update). Replace the full contents of `google_drive.py`
+with:
+
+```python
+"""
+Shared Google Drive API helpers: building an authenticated client from a
+service account (file path or raw JSON key content), and downloading
+small text files by ID.
+
+Used by fetch_whatsapp.py to read the WhatsApp JSONL log.
+"""
+
+import io
+import json
+import os
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+
+
+def build_client(service_account_json: str):
+    if os.path.isfile(service_account_json):
+        credentials = service_account.Credentials.from_service_account_file(
+            service_account_json, scopes=SCOPES
+        )
+    else:
+        info = json.loads(service_account_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=SCOPES
+        )
+    return build("drive", "v3", credentials=credentials)
+
+
+def download_text(drive_service, file_id: str) -> str:
+    request = drive_service.files().get_media(fileId=file_id)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buffer.getvalue().decode("utf-8")
+```
+
+This drops `upload_text` (no longer called anywhere) and the `MediaIoBaseUpload`
+import, and narrows `SCOPES` back to `drive.readonly`.
+
+- [ ] **Step 4: Run the full suite to verify nothing broke**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests — `tests/test_google_drive.py`'s 2 tests only
+exercise `build_client`, unaffected by `upload_text`'s removal).
+
+- [ ] **Step 5: Update `.env.example`**
+
+Replace the full contents with:
+
+```
+# Copy this file to .env and fill in your real values.
+# .env itself is gitignored and should never be committed.
+
+UDT_BASE_URL=https://sarvottam.udtweb.com
+UDT_USERNAME=your_username_here
+UDT_PASSWORD=your_password_here
+
+# Rolling lookback window (hours) used by both fetchers when run
+# standalone (python scrape_udt.py / python fetch_whatsapp.py directly).
+# The orchestrated pipeline (daily_brief.py) ignores this and always
+# uses a month-start cutoff instead (see cutoff.py).
+LOOKBACK_HOURS=36
+
+# Google Drive service account (for reading the WhatsApp JSONL log).
+# Either an absolute path to the service account's JSON key file, or
+# the raw JSON key content itself (used for the cloud-scheduled run,
+# where there's no local file to point to).
+GOOGLE_SERVICE_ACCOUNT_JSON=/absolute/path/to/service-account.json
+
+# The Drive file ID of the WhatsApp JSONL log (from its share URL).
+WHATSAPP_DRIVE_FILE_ID=your_drive_file_id_here
+```
+
+(This removes the `STATE_DRIVE_FILE_ID` block — there's no more state
+file to configure.)
+
+- [ ] **Step 6: Update `README.md`**
+
+Replace the full contents with:
+
+```markdown
+# Daily School Brief
+
+Pulls together messages from the school web portal and (via phone-forwarded
+messages synced through Google Drive) the school WhatsApp group, and
+produces a daily brief covering homework, tomorrow's agenda, tomorrow's
+dress code, and other reminders.
+
+See `docs/superpowers/specs/2026-09-05-daily-school-brief-design.md` for the
+full design and `docs/superpowers/plans/2026-09-05-daily-school-brief.md`
+for the implementation plan and current build status.
+
+## Components
+
+- **`scrape_udt.py`** — logs into the UDT eSchool parent portal, fetches
+  the activity/messages page, parses each message (title, author, date,
+  body, PDF attachments), and filters to a rolling lookback window (default
+  36 hours) when run standalone. Downloads PDF attachments, skipping any
+  file that's already been saved under `output/pdfs/` (by name), so the
+  same document isn't re-downloaded every run. Can be run directly
+  (`python scrape_udt.py`), or imported (`fetch_recent_messages()`) for
+  use by other scripts.
+- **`fetch_whatsapp.py`** — reads WhatsApp group messages forwarded via
+  phone automation into a JSONL file on Google Drive (see
+  `docs/PHONE_SETUP.md`), via the Google Drive API using a service
+  account, filtered to the same rolling lookback window (standalone) or
+  the orchestrated pipeline's month-start cutoff.
+- **`cutoff.py`** — computes the cutoff used by the orchestrated pipeline:
+  2 days before the start of the current calendar month, every run (not
+  an advancing cursor). The portal page and the WhatsApp Drive log both
+  already retain their own full history, so re-fetching the whole month
+  is cheap and nothing posted earlier in the month is ever missed, no
+  matter how many days later it turns out to be relevant.
+- **`daily_brief.py`** — orchestrator that calls both fetchers with that
+  shared cutoff, treating each as best-effort (one source failing doesn't
+  block the other), downloads portal attachments, and writes a combined
+  JSON envelope to `output/daily_brief_input.json`.
+- The `daily-school-brief` Claude Code skill
+  (`.claude/skills/daily-school-brief/SKILL.md`) reads that envelope,
+  `Read`s any downloaded PDF attachments directly (homework/agenda/
+  dress-code details are often inside the document, not just the message
+  text), categorizes everything into homework / tomorrow's agenda /
+  dress code / other reminders, and sends a push notification with the
+  brief. A scheduled cloud routine runs this automatically each evening.
+
+## Setup
+
+1. Create a virtual environment (recommended, optional):
+   ```
+   python3 -m venv venv
+   source venv/bin/activate   # on Windows: venv\Scripts\activate
+   ```
+
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+
+3. Set up your credentials:
+   ```
+   cp .env.example .env
+   ```
+   Then edit `.env` and fill in your real `UDT_USERNAME`, `UDT_PASSWORD`,
+   desired `LOOKBACK_HOURS` (default 36, only used for standalone runs),
+   and — once the WhatsApp side is set up — `GOOGLE_SERVICE_ACCOUNT_JSON`
+   and `WHATSAPP_DRIVE_FILE_ID`.
+   **Never commit `.env`** - it's already in `.gitignore`.
+
+## Run
+
+- Portal scraper only (saves messages + downloads PDFs):
+  ```
+  python scrape_udt.py
+  ```
+- WhatsApp fetcher only (prints recent messages):
+  ```
+  python fetch_whatsapp.py
+  ```
+- Full pipeline (writes the combined brief-input JSON, downloads portal
+  attachments, uses the month-start cutoff):
+  ```
+  python daily_brief.py
+  ```
+
+## Output
+
+- `output/messages_<timestamp>.json` — all parsed portal messages within
+  the lookback window, with title, author/date, body text, and attachment
+  info (written by `scrape_udt.py`'s standalone `run()`).
+- `output/pdfs/` — downloaded PDF (or other) attachments, named after
+  their display name in the portal. Populated by both standalone runs and
+  the orchestrated pipeline; a file already present here is not
+  re-downloaded.
+- `output/daily_brief_input.json` — combined `{"portal": {...}, "whatsapp":
+  {...}}` envelope written by `daily_brief.py`, each side having
+  `messages` and `error` fields.
+
+## Notes
+
+- All portal messages currently load on a single page load (no pagination
+  or infinite-scroll fetching) — if the school portal changes this in the
+  future, the script will silently only see what's in that first page
+  load and may need extending.
+- Portal login is a plain form POST to `/Logins/index` with `username`/
+  `password` fields — if the school changes their login page (adds a
+  CSRF token, captcha, etc.) this script will need updating to match.
+- PDF attachments are fetched by following each attachment's viewer page
+  and extracting the real file URL from an embedded `file_path` JS
+  variable, then downloading that URL directly (skipped if already
+  downloaded).
+- WhatsApp messages are captured entirely through Android's normal
+  notification system (via phone automation), not through any unofficial
+  WhatsApp client library — see the design spec for why.
+```
+
+- [ ] **Step 7: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
