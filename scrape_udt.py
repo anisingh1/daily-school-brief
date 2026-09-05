@@ -44,8 +44,8 @@ LOOKBACK_HOURS = float(os.getenv("LOOKBACK_HOURS", "36"))
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
-PDF_DIR = OUTPUT_DIR / "pdfs"
-PDF_DIR.mkdir(exist_ok=True)
+PDF_DIR = Path(__file__).parent / "data" / "pdfs"
+PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
