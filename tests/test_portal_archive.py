@@ -154,3 +154,37 @@ def test_prune_archive_keeps_pdf_for_recent_message(tmp_path):
     portal_archive.prune_archive([recent], now)
 
     assert pdf_path.exists()
+
+
+def test_prune_archive_handles_empty_id_messages_with_distinct_attachment_paths(tmp_path):
+    # Regression test for the scrape_udt.py filename-collision bug: two messages
+    # both lacking an "id" (the parser's fallback for an HTML element with no id
+    # attribute) used to compute the same saved_as filename if they also shared
+    # an attachment display name, so pruning one would delete the other's file
+    # too. Post-fix, their saved_as paths are distinct (derived from the
+    # attachment's href instead of the empty id) - this asserts prune_archive
+    # only touches the pruned message's own file.
+    now = datetime(2026, 9, 5)
+    old_pdf_path = tmp_path / "_viewer1_Homework.pdf"
+    old_pdf_path.write_bytes(b"old pdf content")
+    recent_pdf_path = tmp_path / "_viewer2_Homework.pdf"
+    recent_pdf_path.write_bytes(b"recent pdf content")
+
+    old = {
+        "id": "", "title": "t",
+        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "body": "b",
+        "attachments": [{"name": "Homework", "href": "/viewer1", "saved_as": str(old_pdf_path)}],
+    }
+    recent = {
+        "id": "", "title": "t",
+        "posted_at": (now - timedelta(days=5)).isoformat(),
+        "body": "b",
+        "attachments": [{"name": "Homework", "href": "/viewer2", "saved_as": str(recent_pdf_path)}],
+    }
+
+    result = portal_archive.prune_archive([old, recent], now)
+
+    assert result == [recent]
+    assert not old_pdf_path.exists()
+    assert recent_pdf_path.exists()

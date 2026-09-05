@@ -266,3 +266,35 @@ def test_download_message_attachments_does_not_collide_across_messages_with_same
     assert saved1 != saved2
     assert Path(saved1).read_bytes() == b"day one content"
     assert Path(saved2).read_bytes() == b"day two content"
+
+
+def test_download_message_attachments_does_not_collide_when_both_ids_empty(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+
+    class FakeSession:
+        def get(self, url):
+            if "viewer1" in url:
+                return type("R", (), {"text": 'var file_path = "http://example.com/files/day1.pdf";'})()
+            if "viewer2" in url:
+                return type("R", (), {"text": 'var file_path = "http://example.com/files/day2.pdf";'})()
+            if "day1.pdf" in url:
+                return type("R", (), {"content": b"day one content"})()
+            if "day2.pdf" in url:
+                return type("R", (), {"content": b"day two content"})()
+            raise AssertionError(f"unexpected url: {url}")
+
+    messages = [
+        {"id": "", "attachments": [{"name": "Homework", "href": "/viewer1"}]},
+        {"id": "", "attachments": [{"name": "Homework", "href": "/viewer2"}]},
+    ]
+
+    scrape_udt.download_message_attachments(FakeSession(), messages)
+
+    saved1 = messages[0]["attachments"][0]["saved_as"]
+    saved2 = messages[1]["attachments"][0]["saved_as"]
+
+    assert saved1 != saved2
+    assert Path(saved1).read_bytes() == b"day one content"
+    assert Path(saved2).read_bytes() == b"day two content"
