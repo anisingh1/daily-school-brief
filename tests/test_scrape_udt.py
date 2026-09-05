@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -156,7 +157,7 @@ def test_download_message_attachments_skips_already_downloaded_file(tmp_path, mo
     import scrape_udt
 
     monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
-    existing_file = tmp_path / "Homework.pdf"
+    existing_file = tmp_path / "msg1_Homework.pdf"
     existing_file.write_bytes(b"old content")
 
     class FakeViewerResponse:
@@ -171,7 +172,7 @@ def test_download_message_attachments_skips_already_downloaded_file(tmp_path, mo
             return FakeViewerResponse()
 
     session = FakeSession()
-    messages = [{"attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+    messages = [{"id": "msg1", "attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
 
     scrape_udt.download_message_attachments(session, messages)
 
@@ -198,11 +199,70 @@ def test_download_message_attachments_downloads_new_file(tmp_path, monkeypatch):
                 return FakeViewerResponse()
             return FakeFileResponse()
 
-    messages = [{"attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+    messages = [{"id": "msg1", "attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
 
     scrape_udt.download_message_attachments(FakeSession(), messages)
 
-    saved_path = tmp_path / "Homework.pdf"
+    saved_path = tmp_path / "msg1_Homework.pdf"
     assert saved_path.exists()
     assert saved_path.read_bytes() == b"pdf bytes"
     assert messages[0]["attachments"][0]["saved_as"] == str(saved_path)
+
+
+def test_download_message_attachments_strips_query_string_from_extension(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+
+    class FakeViewerResponse:
+        text = 'var file_path = "http://example.com/files/homework.pdf?token=abc123";'
+
+    class FakeFileResponse:
+        content = b"pdf bytes"
+
+    class FakeSession:
+        def get(self, url):
+            if "viewer" in url:
+                return FakeViewerResponse()
+            return FakeFileResponse()
+
+    messages = [{"id": "msg1", "attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+
+    scrape_udt.download_message_attachments(FakeSession(), messages)
+
+    saved_as = messages[0]["attachments"][0]["saved_as"]
+    assert saved_as.endswith(".pdf")
+    assert "?" not in saved_as
+    assert Path(saved_as).read_bytes() == b"pdf bytes"
+
+
+def test_download_message_attachments_does_not_collide_across_messages_with_same_name(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+
+    class FakeSession:
+        def get(self, url):
+            if "viewer1" in url:
+                return type("R", (), {"text": 'var file_path = "http://example.com/files/day1.pdf";'})()
+            if "viewer2" in url:
+                return type("R", (), {"text": 'var file_path = "http://example.com/files/day2.pdf";'})()
+            if "day1.pdf" in url:
+                return type("R", (), {"content": b"day one content"})()
+            if "day2.pdf" in url:
+                return type("R", (), {"content": b"day two content"})()
+            raise AssertionError(f"unexpected url: {url}")
+
+    messages = [
+        {"id": "msg1", "attachments": [{"name": "Homework", "href": "/viewer1"}]},
+        {"id": "msg2", "attachments": [{"name": "Homework", "href": "/viewer2"}]},
+    ]
+
+    scrape_udt.download_message_attachments(FakeSession(), messages)
+
+    saved1 = messages[0]["attachments"][0]["saved_as"]
+    saved2 = messages[1]["attachments"][0]["saved_as"]
+
+    assert saved1 != saved2
+    assert Path(saved1).read_bytes() == b"day one content"
+    assert Path(saved2).read_bytes() == b"day two content"

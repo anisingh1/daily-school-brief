@@ -173,10 +173,11 @@ def download_message_attachments(session, messages: list[dict]) -> None:
                     continue
 
                 file_url = match.group(1).replace("\\/", "/")
+                path_part = file_url.split("?")[0].split("#")[0]
                 ext = ""
-                if "." in file_url.rsplit("/", 1)[-1]:
-                    ext = "." + file_url.rsplit(".", 1)[-1]
-                safe_name = re.sub(r"[^\w\-. ]", "_", att["name"]) + ext
+                if "." in path_part.rsplit("/", 1)[-1]:
+                    ext = "." + path_part.rsplit(".", 1)[-1]
+                safe_name = re.sub(r"[^\w\-. ]", "_", f"{m['id']}_{att['name']}") + ext
                 dest_path = PDF_DIR / safe_name
 
                 if dest_path.exists():

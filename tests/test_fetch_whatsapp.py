@@ -101,7 +101,7 @@ def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():
 def test_filter_recent_normalizes_naive_explicit_cutoff():
     from fetch_whatsapp import filter_recent
 
-    naive_cutoff = datetime(2026, 9, 4, 12, 0, 0)  # no tzinfo - simulates drive_state.compute_cutoff()
+    naive_cutoff = datetime(2026, 9, 4, 12, 0, 0)  # no tzinfo - simulates cutoff.compute_cutoff()
     just_after = (naive_cutoff + timedelta(minutes=1)).isoformat()  # also naive
     messages = [{"timestamp": just_after, "sender": "A", "text": "hi"}]
 

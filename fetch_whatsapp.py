@@ -6,7 +6,7 @@ docs/PHONE_SETUP.md) which appends one JSON line per message to a file
 in a Google Drive folder. This module reads that file via the Drive API
 using a service account (see google_drive.py) and filters to a rolling
 lookback window, or an explicit absolute cutoff when one is provided
-(used by daily_brief.py's cross-run cursor - see drive_state.py).
+(used by daily_brief.py's orchestrated pipeline cutoff).
 
 SETUP:
     - Create a Google Cloud service account with Drive API access.
