@@ -26,6 +26,19 @@ From the Play Store. Free tier is enough for one rule.
   Variables" / "Magic Text" reference in Configure Action for the
   current equivalents.)
 
+  **Caveat - unescaped quotes/newlines:** `%notification_text%` is a
+  naive string paste into the JSON template. A message containing a
+  `"` or a line break will produce a malformed JSON line, which
+  `fetch_whatsapp.py`'s parser silently skips - that message is
+  silently lost. Check whether your MacroDroid tier's "Local
+  Variables" / "Magic Text" reference offers a JSON-encode/escape
+  action (or a JavaScript/scripting action that can JSON-encode a
+  variable) and apply it to `%notification_text%` (and, less
+  critically, `%notification_title%`) before writing the line. If no
+  such function is available in your tier, periodically spot-check the
+  Drive log file against the actual group history so you notice if
+  messages are being silently dropped.
+
 ## 3. Install a folder-sync app
 
 Install **Autosync for Google Drive** (or FolderSync, by MetaCtrl) from
