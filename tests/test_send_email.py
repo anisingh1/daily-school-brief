@@ -24,18 +24,23 @@ def test_send_brief_email_sends_via_smtp(monkeypatch):
             calls["port"] = port
 
         def __enter__(self):
+            calls.setdefault("sequence", []).append("enter")
             return self
 
         def __exit__(self, *args):
+            calls.setdefault("sequence", []).append("exit")
             return False
 
         def starttls(self):
+            calls.setdefault("sequence", []).append("starttls")
             calls["starttls"] = True
 
         def login(self, username, password):
+            calls.setdefault("sequence", []).append("login")
             calls["login"] = (username, password)
 
         def sendmail(self, from_addr, to_addrs, msg):
+            calls.setdefault("sequence", []).append("sendmail")
             calls["sendmail"] = (from_addr, to_addrs)
             calls["msg_contains_html"] = "<p>body</p>" in msg
 
@@ -48,6 +53,43 @@ def test_send_brief_email_sends_via_smtp(monkeypatch):
     assert calls["login"] == ("me@gmail.com", "app-pass")
     assert calls["sendmail"] == ("me@gmail.com", ["family@gmail.com"])
     assert calls["msg_contains_html"] is True
+    assert calls["sequence"] == ["enter", "starttls", "login", "sendmail", "exit"]
+
+
+def test_send_brief_email_splits_comma_separated_recipients(monkeypatch):
+    monkeypatch.setattr(send_email, "SMTP_USERNAME", "me@gmail.com")
+    monkeypatch.setattr(send_email, "SMTP_APP_PASSWORD", "app-pass")
+    monkeypatch.setattr(send_email, "EMAIL_TO", "family@gmail.com, other@gmail.com")
+
+    calls = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, username, password):
+            pass
+
+        def sendmail(self, from_addr, to_addrs, msg):
+            calls["sendmail"] = (from_addr, to_addrs)
+
+    monkeypatch.setattr(send_email.smtplib, "SMTP", FakeSMTP)
+
+    send_email.send_brief_email("Test Subject", "<p>body</p>")
+
+    assert calls["sendmail"] == (
+        "me@gmail.com",
+        ["family@gmail.com", "other@gmail.com"],
+    )
 
 
 def test_run_reads_content_renders_and_sends(tmp_path, monkeypatch):

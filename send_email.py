@@ -41,21 +41,34 @@ EMAIL_TO = os.getenv("EMAIL_TO")
 CONTENT_PATH = Path(__file__).parent / "output" / "daily_brief_content.json"
 
 
+def _parse_recipients(value: str) -> list[str]:
+    """Split a comma-separated recipient string into individual addresses.
+
+    EMAIL_TO may naturally be set to multiple comma-separated addresses
+    (the To: header supports that syntax), but sendmail's envelope
+    recipient list needs each address as its own list element - passing
+    the whole string as a single element silently delivers to only the
+    first address with no error.
+    """
+    return [addr.strip() for addr in value.split(",") if addr.strip()]
+
+
 def send_brief_email(subject: str, html_body: str) -> None:
     if not SMTP_USERNAME or not SMTP_APP_PASSWORD or not EMAIL_TO:
         raise RuntimeError(
             "SMTP_USERNAME, SMTP_APP_PASSWORD, and/or EMAIL_TO are not set."
         )
+    recipients = _parse_recipients(EMAIL_TO)
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = SMTP_USERNAME
-    msg["To"] = EMAIL_TO
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
         server.starttls()
         server.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
-        server.sendmail(SMTP_USERNAME, [EMAIL_TO], msg.as_string())
+        server.sendmail(SMTP_USERNAME, recipients, msg.as_string())
 
 
 def run() -> None:
