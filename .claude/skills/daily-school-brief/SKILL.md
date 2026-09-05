@@ -118,6 +118,14 @@ Then sends the brief as a push notification.
      a reminder to pack swimming dress for tomorrow. When today (IST)
      is Wednesday, include a reminder to pack skating shoes for
      tomorrow.
+
+     **Override rule**: if a scraped message calls out a specific dress
+     code for tomorrow (a special event, a change of plan, "no
+     swimming/skating tomorrow", etc.), that message-sourced instruction
+     wins - state that one instead of the fixed swim/skate reminder
+     above, don't just add it alongside as if both applied. Only fall
+     back to the fixed weekly swim/skate reminder when nothing in the
+     scraped messages says otherwise for that specific day.
    - **Other reminders**: anything else worth a parent's attention (fee
      due dates, forms to sign, items to bring) that doesn't fit the
      above.
