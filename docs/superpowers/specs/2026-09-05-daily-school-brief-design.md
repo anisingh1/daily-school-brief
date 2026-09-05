@@ -87,35 +87,60 @@ does not depend on any personal machine being powered on.
   append-only log; the fetcher only ever reads and filters, so there's no
   risk of losing data through a race with the phone still appending.
 
-### 2a. Month-start cutoff, not a persisted cursor
+### 2a. Month-start cutoff for WhatsApp; a git-committed archive + cursor for the portal
 
-Two earlier revisions of this section are superseded here. The original
-design used a fixed ~36h rolling window with no persisted state; a later
-revision added a Google-Drive-persisted "last run" cursor to avoid
-re-fetching the same window every day. Both had the same flaw: content
-posted once (e.g. a monthly planner PDF posted at the start of the
-month, containing information relevant to a specific day later in the
-month) would only ever be seen on the day it was originally posted —
-once a rolling window or an advancing cursor moved past it, that
-day-specific information was gone for good, even though it had been
-fetched (and, for PDFs, downloaded) once already.
+Three revisions of this section, superseding each other in turn:
 
-The fix doesn't need new persisted state at all: `fetch_activity_messages()`
-already returns every message currently visible on the portal's one
-activity page — not just what's "new" — and the WhatsApp Drive log
-already retains its entire history (nothing is ever deleted from it). So
-for the orchestrated pipeline, both fetchers simply use a cutoff of "2
-days before the start of the current calendar month" (`cutoff.py`'s
-`month_anchor()`) **every run**, not an advancing cursor. This means nothing
-this-month is ever dropped from consideration, regardless of when it was
-originally posted.
+1. **Original**: a fixed ~36h rolling window, no persisted state.
+2. **Google-Drive-persisted cursor**: avoided re-fetching the same window
+   daily, but had a real flaw — content posted once (e.g. a monthly
+   planner PDF posted at the start of the month, containing information
+   relevant to a specific day later in the month) would only ever be
+   seen on the day it was originally posted; once the cursor advanced
+   past it, that day-specific information was gone for good.
+3. **Month-anchor-always** (no persisted state at all): fixed the above
+   by always using "2 days before start of current month" as the
+   cutoff, relying on the portal page and the WhatsApp Drive log already
+   retaining their own full history. Correct, but re-fetches and
+   re-processes the whole month on every run, with no way to build on
+   top of it (e.g. no way to consider anything older than the current
+   month without reprocessing it every single day).
 
-Re-fetching and re-filtering the whole month is cheap (one login + one
-page parse; one small text-file read) — the only genuinely expensive
-thing to avoid repeating is downloading the same PDF attachment again
-every day, which is solved separately and locally: `scrape_udt.py` skips
-downloading an attachment if a file with its target name already exists
-under `output/pdfs/`.
+**Current design** keeps revision 3 for WhatsApp (its Drive log already
+retains everything, at no extra cost to re-scan the current month), but
+replaces it for the portal with a git-committed archive:
+
+- **`data/portal_messages.json`** — every portal message ever scraped,
+  deduplicated by message id, merged with each new fetch. Committed to
+  this repo (not gitignored, unlike `output/`).
+- **`data/last_run.json`** — the portal-specific cursor:
+  `{"last_run": "<isoformat>"}`. Also committed.
+- **`data/pdfs/`** — downloaded PDF attachments (redirected here from
+  the previous `output/pdfs/`), also committed.
+
+Portal cutoff logic (`portal_archive.py`): if `data/last_run.json`
+doesn't exist yet (fresh setup, or a reset), fall back to
+`cutoff.month_anchor()`. Otherwise, use the last run's timestamp — only
+the messages posted since then need to be freshly scraped. Those new
+messages are merged into the existing archive (by id, so a re-scraped
+message overwrites its old entry rather than duplicating), and **the
+brief is always built from the full merged archive, not just the newest
+fetch** — so nothing scraped at any point in the past is ever dropped
+from consideration, however efficient the fetch itself becomes.
+
+WhatsApp intentionally stays decoupled from the portal's cursor and
+keeps using `cutoff.month_anchor()` directly, every run — its Drive log
+already retains full history on its own, so there's no equivalent
+problem to solve, and no reason to couple its cutoff to the portal's
+advancing cursor.
+
+**Critical operational requirement**: the scheduled cloud routine clones
+this repo fresh on every run (see "Scheduling & delivery" below). Local
+writes to `data/` during a run only exist in that run's ephemeral clone
+— they do **not** persist to tomorrow's fresh clone unless something
+commits and pushes them back to GitHub before the run ends. The
+`daily-school-brief` skill's instructions include this as an explicit
+step after generating the brief.
 
 Standalone script usage (`python scrape_udt.py` / `python
 fetch_whatsapp.py` run directly, not via `daily_brief.py`) is unaffected
@@ -191,10 +216,10 @@ sending nothing.
 
 - Single child, single class WhatsApp group, single portal account —
   matches current usage; no multi-child or multi-group support.
-- No historical archive/database of past messages, and no persisted
-  cursor between runs at all — the orchestrated pipeline always uses a
-  month-start cutoff (see "Month-start cutoff" above), relying on the
-  portal's own page and the WhatsApp Drive log already retaining their
-  history; nothing extra is stored by this project beyond the downloaded
-  PDFs in `output/pdfs/` (deduped by filename, not otherwise pruned).
+- No database, no external store for persistence — the portal archive,
+  cursor, and PDFs live in this git repo itself (`data/`, see "Month-start
+  cutoff for WhatsApp; a git-committed archive + cursor for the portal"
+  above), growing without pruning. WhatsApp has no equivalent archive —
+  it relies entirely on its own Drive log's retention and a stateless
+  month-start cutoff.
 - No in-app UI — delivery is a push notification only (per user choice).
