@@ -42,9 +42,12 @@ Then writes it as structured content and sends it as an HTML email.
 
    If `python daily_brief.py` fails to run (crashes, `python` not
    found, etc.) or `output/daily_brief_input.json` does not exist
-   afterward, don't stop silently - send a push notification saying
-   the daily brief couldn't be generated, including a short reason if
-   one is available, and stop there.
+   afterward, don't stop silently - write
+   `output/daily_brief_content.json` with just a `warnings` entry
+   describing the failure (all other fields empty/`null` - see step 8
+   for the exact shape) and run `python send_email.py` anyway, so you
+   still get an email saying the brief couldn't be generated, including
+   a short reason if one is available. Then stop there.
 
 2. Commit and push any changes under `data/` (the portal message
    archive, cursor, and downloaded PDFs) so they persist for the next
