@@ -56,6 +56,25 @@ def test_gather_does_not_save_archive_or_cursor_on_portal_failure(monkeypatch):
     assert "last_run" not in saved
 
 
+def test_gather_does_not_advance_cursor_if_archive_save_fails(monkeypatch):
+    saved = {}
+
+    def failing_save_archive(archive):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"id": "new", "title": "x"}])
+    monkeypatch.setattr(daily_brief, "merge_into_archive", lambda new: [{"id": "new", "title": "x"}])
+    monkeypatch.setattr(daily_brief, "save_archive", failing_save_archive)
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert "last_run" not in saved
+    assert result["portal"]["error"] == "RuntimeError: disk full"
+
+
 def test_gather_captures_whatsapp_error(monkeypatch):
     def failing_fetch(**kwargs):
         raise RuntimeError("drive unreachable")
