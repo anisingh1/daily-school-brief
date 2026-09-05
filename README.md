@@ -111,6 +111,10 @@ for the implementation plan and current build status.
 - `output/daily_brief_input.json` — combined `{"portal": {...}, "whatsapp":
   {...}}` envelope written by `daily_brief.py`, each side having
   `messages` and `error` fields. Not committed.
+- `output/daily_brief_content.json` — the skill's structured categorization
+  (`date`, `warnings`, `aviraj_highlight`, `homework`, `agenda`,
+  `dress_code`, `reminders`), consumed by `send_email.py` to render and
+  send the HTML email. Not committed.
 - `data/portal_messages.json` — the permanent portal message archive,
   deduplicated by message id. Committed to this repo.
 - `data/last_run.json` — the portal cursor (`{"last_run": "<isoformat>"}`).
