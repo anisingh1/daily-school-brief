@@ -82,13 +82,13 @@ def filter_recent(messages: list[dict], lookback_hours: float) -> list[dict]:
             continue
         try:
             ts = dateparser.parse(raw_ts)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             continue
         if ts.tzinfo is None:
             ts = ts.astimezone()
         if ts >= cutoff:
             filtered.append(m)
-    filtered.sort(key=lambda m: m["timestamp"])
+    filtered.sort(key=lambda m: dateparser.parse(m["timestamp"]).astimezone())
     return filtered
 
 
