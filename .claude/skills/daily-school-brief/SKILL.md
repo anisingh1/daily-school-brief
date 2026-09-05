@@ -9,7 +9,8 @@ description: Generate the daily school brief (homework, tomorrow's agenda, dress
 
 Combines two message sources - the school web portal and the school
 WhatsApp group (captured via phone automation into a Google Drive file)
-- covering roughly the last 36 hours, and produces a short brief covering:
+- covering everything since the start of the current calendar month, and
+produces a short brief covering:
 
 - Homework
 - Tomorrow's school agenda (events, holidays, notices)
@@ -33,7 +34,8 @@ Then sends the brief as a push notification.
 
    This writes `output/daily_brief_input.json` with two sections,
    `portal` and `whatsapp`, each having `messages` (a list) and `error`
-   (a string or null).
+   (a string or null). Portal messages may include an `attachments`
+   list; a downloaded attachment has a `saved_as` local file path.
 
    If `python daily_brief.py` fails to run (crashes, `python` not
    found, etc.) or `output/daily_brief_input.json` does not exist
@@ -45,17 +47,25 @@ Then sends the brief as a push notification.
    root from step 1 - this only works if you're actually in that
    directory when you run step 1).
 
-3. For each source with a non-null `error`, note it as a warning to
+3. For each portal message that has an attachment with a `saved_as`
+   path, `Read` that file directly (Claude Code's `Read` tool handles
+   PDFs natively). Homework, agenda, and dress-code details are often
+   inside the document itself - a monthly planner PDF, for instance -
+   rather than in the message body text, so don't rely on the body
+   text alone when an attachment is present.
+
+4. For each source with a non-null `error`, note it as a warning to
    include at the top of the brief (e.g. "couldn't reach school
    portal") - a failure in one source should not stop you from using
    the other source's messages.
 
-4. If both sources have zero messages and no errors, the brief is just:
-   "Nothing new from the school portal or WhatsApp group in the last day."
+5. If both sources have zero messages and no errors, the brief is just:
+   "Nothing new from the school portal or WhatsApp group this month."
 
-5. Otherwise, read through all messages from both sources and use your
-   own judgment to extract (the messages are unstructured free text -
-   don't pattern-match on fixed keywords):
+6. Otherwise, read through all messages (and any attachment content
+   read in step 3) from both sources and use your own judgment to
+   extract (the content is unstructured free text - don't pattern-match
+   on fixed keywords):
    - **Homework**: any assignment, reading, or task mentioned for the
      child to do.
    - **Tomorrow's agenda**: events, special activities, holidays, timing
@@ -63,6 +73,9 @@ Then sends the brief as a push notification.
      today's date in IST - India Standard Time, UTC+5:30, the school's
      timezone - to work out what "tomorrow" refers to; do not use the
      local timezone of the machine or sandbox running this skill).
+     Content posted earlier in the month (e.g. a monthly planner) that
+     happens to apply to tomorrow counts just as much as something
+     posted today.
    - **Dress code**: any uniform/dress instructions that apply tomorrow
      (e.g. "sports day, wear house colors", "PE kit tomorrow").
    - **Other reminders**: anything else worth a parent's attention (fee
@@ -71,11 +84,11 @@ Then sends the brief as a push notification.
    Omit a section entirely if there's nothing for it, rather than
    forcing an empty slot.
 
-6. Compose the brief as plain text with short section headers. This is
+7. Compose the brief as plain text with short section headers. This is
    a draft/internal step - it's fine for this draft to span multiple
    lines and sections.
 
-7. Condense that draft into the actual notification message: the
+8. Condense that draft into the actual notification message: the
    PushNotification tool requires a single line of plain text with no
    markdown formatting. Send it with `status: "proactive"`, `message`
    = the condensed brief. Mobile OSes truncate long notifications, so

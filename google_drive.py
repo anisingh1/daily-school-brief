@@ -1,10 +1,9 @@
 """
 Shared Google Drive API helpers: building an authenticated client from a
-service account (file path or raw JSON key content), and
-downloading/uploading small text files by ID.
+service account (file path or raw JSON key content), and downloading
+small text files by ID.
 
-Used by both fetch_whatsapp.py (reads the WhatsApp JSONL log) and
-drive_state.py (reads/writes the cross-run cursor).
+Used by fetch_whatsapp.py to read the WhatsApp JSONL log.
 """
 
 import io
@@ -13,9 +12,9 @@ import os
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
 def build_client(service_account_json: str):
@@ -39,8 +38,3 @@ def download_text(drive_service, file_id: str) -> str:
     while not done:
         _, done = downloader.next_chunk()
     return buffer.getvalue().decode("utf-8")
-
-
-def upload_text(drive_service, file_id: str, text: str) -> None:
-    media = MediaIoBaseUpload(io.BytesIO(text.encode("utf-8")), mimetype="text/plain")
-    drive_service.files().update(fileId=file_id, media_body=media).execute()
