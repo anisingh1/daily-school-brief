@@ -96,3 +96,15 @@ def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():
     # confirming cutoff, not lookback_hours, governs the result.
     result = filter_recent(messages, lookback_hours=1000, cutoff=cutoff)
     assert [m["text"] for m in result] == ["in"]
+
+
+def test_filter_recent_normalizes_naive_explicit_cutoff():
+    from fetch_whatsapp import filter_recent
+
+    naive_cutoff = datetime(2026, 9, 4, 12, 0, 0)  # no tzinfo - simulates drive_state.compute_cutoff()
+    just_after = (naive_cutoff + timedelta(minutes=1)).isoformat()  # also naive
+    messages = [{"timestamp": just_after, "sender": "A", "text": "hi"}]
+
+    result = filter_recent(messages, cutoff=naive_cutoff)  # must not raise TypeError
+
+    assert len(result) == 1

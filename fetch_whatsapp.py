@@ -56,6 +56,8 @@ def filter_recent(
         if lookback_hours is None:
             lookback_hours = LOOKBACK_HOURS
         cutoff = datetime.now().astimezone() - timedelta(hours=lookback_hours)
+    elif cutoff.tzinfo is None:
+        cutoff = cutoff.astimezone()
     filtered = []
     for m in messages:
         raw_ts = m.get("timestamp")
@@ -84,7 +86,6 @@ def fetch_recent_whatsapp_messages(
     text = google_drive.download_text(drive_service, DRIVE_FILE_ID)
     messages = parse_jsonl(text)
     return filter_recent(messages, lookback_hours=lookback_hours, cutoff=cutoff)
-
 
 if __name__ == "__main__":
     for msg in fetch_recent_whatsapp_messages():
