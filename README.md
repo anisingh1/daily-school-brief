@@ -41,14 +41,22 @@ for the implementation plan and current build status.
   treating each as best-effort (one source failing doesn't block the
   other), downloads portal attachments, and writes a combined JSON
   envelope to `output/daily_brief_input.json`.
+- **`render_email.py`** — pure function, `render_brief_html(data)`,
+  turning the skill's structured categorization (`output/daily_brief_content.json`)
+  into a polished, sectioned HTML email body. Deterministic and tested,
+  so visual quality is consistent every day regardless of that day's
+  content.
+- **`send_email.py`** — reads `output/daily_brief_content.json`, renders
+  it via `render_email.py`, and sends it as an HTML email via Gmail SMTP.
 - The `daily-school-brief` Claude Code skill
   (`.claude/skills/daily-school-brief/SKILL.md`) reads that envelope,
   `Read`s any downloaded PDF attachments directly (homework/agenda/
   dress-code details are often inside the document, not just the message
   text), commits and pushes `data/` so the archive/cursor persist across
   future runs, categorizes everything into homework / tomorrow's agenda
-  / dress code / other reminders, and sends a push notification with the
-  brief. A scheduled cloud routine runs this automatically each evening.
+  / dress code / other reminders, and writes `output/daily_brief_content.json`
+  and runs `send_email.py` to send it as an HTML email. A scheduled cloud
+  routine runs this automatically each evening.
 
 ## Setup
 
@@ -70,7 +78,9 @@ for the implementation plan and current build status.
    Then edit `.env` and fill in your real `UDT_USERNAME`, `UDT_PASSWORD`,
    desired `LOOKBACK_HOURS` (default 36, only used for standalone runs),
    and — once the WhatsApp side is set up — `GOOGLE_SERVICE_ACCOUNT_JSON`
-   and `WHATSAPP_DRIVE_FILE_ID`.
+   and `WHATSAPP_DRIVE_FILE_ID`, and `SMTP_USERNAME`/`SMTP_APP_PASSWORD`/
+   `EMAIL_TO` for sending the brief by email (see `send_email.py`'s
+   docstring for how to create a Gmail App Password).
    **Never commit `.env`** - it's already in `.gitignore`.
 
 ## Run

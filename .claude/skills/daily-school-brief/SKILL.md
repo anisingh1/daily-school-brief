@@ -1,6 +1,6 @@
 ---
 name: daily-school-brief
-description: Generate the daily school brief (homework, tomorrow's agenda, dress code, other reminders) from the school portal and WhatsApp group logs, and push a notification with it. Use when asked to run or generate the daily school brief, or on the scheduled evening trigger.
+description: Generate the daily school brief (homework, tomorrow's agenda, dress code, other reminders) from the school portal and WhatsApp group logs, and send it as an HTML email. Use when asked to run or generate the daily school brief, or on the scheduled evening trigger.
 ---
 
 # Daily School Brief
@@ -18,7 +18,7 @@ onward) - and produces a short brief covering:
 - Tomorrow's dress code
 - Other reminders
 
-Then sends the brief as a push notification.
+Then writes it as structured content and sends it as an HTML email.
 
 ## Steps
 
@@ -151,15 +151,35 @@ Then sends the brief as a push notification.
    Omit a section entirely if there's nothing for it, rather than
    forcing an empty slot.
 
-8. Compose the brief as plain text with short section headers. This is
-   a draft/internal step - it's fine for this draft to span multiple
-   lines and sections.
+8. Assemble the categorization from step 7 into a single structured
+   JSON object with these exact keys:
+   - `date`: a short human-readable label for what this brief covers,
+     e.g. `"Monday, September 7, 2026"` (the date `tomorrow` refers to
+     in IST).
+   - `warnings`: list of strings, one per source that had a non-null
+     `error` (from step 5) - empty list if none.
+   - `aviraj_highlight`: a single string if a message specifically named
+     Aviraj (from the highlight rule above), otherwise `null`.
+   - `homework`: list of strings, one per homework item - empty list if
+     none.
+   - `agenda`: list of strings, one per tomorrow's-agenda item - empty
+     list if none.
+   - `dress_code`: a single string (the effective dress-code instruction
+     for tomorrow, after applying the override rule above), or `null` if
+     nothing applies.
+   - `reminders`: list of strings, one per other-reminder item within the
+     5-day window - empty list if none.
 
-9. Condense that draft into the actual notification message: the
-   PushNotification tool requires a single line of plain text with no
-   markdown formatting. Send it with `status: "proactive"`, `message`
-   = the condensed brief. Mobile OSes truncate long notifications, so
-   keep the single line under ~200 characters where possible - lead
-   with the most time-sensitive items (tomorrow's dress code, homework
-   due tomorrow) first, since anything after that point may get cut
-   off if the full brief would run longer.
+   Write this object as JSON to `output/daily_brief_content.json`.
+
+9. Run:
+
+   ```bash
+   python send_email.py
+   ```
+
+   This reads `output/daily_brief_content.json`, renders it into a
+   styled HTML email (see `render_email.py`), and sends it via Gmail
+   SMTP to the configured recipient (`EMAIL_TO` in `.env`). If this
+   command fails (e.g. SMTP credentials not configured, network error),
+   report the failure - don't treat it as if the brief was delivered.
