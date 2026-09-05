@@ -24,6 +24,12 @@ for the implementation plan and current build status.
 - **`daily_brief.py`** — orchestrator that calls both fetchers, treating
   each as best-effort (one source failing doesn't block the other), and
   writes a combined JSON envelope to `output/daily_brief_input.json`.
+- **`drive_state.py`** — persists a small `last_run` cursor on Google
+  Drive between orchestrated runs, so `daily_brief.py` only looks back as
+  far as the last successful run instead of a fixed window. Falls back
+  to 2 days before the start of the current calendar month when no
+  cursor exists yet (fresh setup, or after a gap), so a start-of-month
+  monthly planner PDF is never missed.
 - A Claude Code skill (planned) reads that envelope, categorizes the
   content into homework / tomorrow's agenda / dress code / other
   reminders, and sends a push notification with the brief. A scheduled
@@ -48,7 +54,8 @@ for the implementation plan and current build status.
    ```
    Then edit `.env` and fill in your real `UDT_USERNAME`, `UDT_PASSWORD`,
    desired `LOOKBACK_HOURS` (default 36), and — once the WhatsApp side is
-   set up — `GOOGLE_SERVICE_ACCOUNT_JSON` and `WHATSAPP_DRIVE_FILE_ID`.
+   set up — `GOOGLE_SERVICE_ACCOUNT_JSON`, `WHATSAPP_DRIVE_FILE_ID`, and
+   `STATE_DRIVE_FILE_ID`.
    **Never commit `.env`** - it's already in `.gitignore`.
 
 ## Run
