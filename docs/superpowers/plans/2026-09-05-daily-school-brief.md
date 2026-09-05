@@ -2431,3 +2431,833 @@ for the implementation plan and current build status.
 
 Commit with a descriptive message (normal `git add`/`git commit`/`git
 push`, no force-push, no amend).
+
+---
+
+## Addendum 3: Git-committed portal archive + cursor (replaces month-anchor-only for the portal)
+
+See the spec's "Month-start cutoff for WhatsApp; a git-committed archive
++ cursor for the portal" section for full rationale. Summary: instead of
+always re-scanning "this calendar month" for the portal (Addendum 2),
+the portal now gets its own permanent archive committed to this repo
+(`data/portal_messages.json`, deduplicated by message id) plus a cursor
+(`data/last_run.json`). Only new-since-cursor messages are freshly
+scraped each run, merged into the archive, but the brief is always built
+from the FULL archive — so nothing scraped at any point in the past is
+ever dropped, while fetches stay efficient. WhatsApp is unaffected and
+keeps using `cutoff.month_anchor()` directly, decoupled from the
+portal's cursor.
+
+### Task 17: `portal_archive.py` module; simplify `cutoff.py`
+
+**Files:**
+- Create: `portal_archive.py`
+- Modify: `cutoff.py`
+- Test: Create `tests/test_portal_archive.py`; Modify `tests/test_cutoff.py`
+
+- [ ] **Step 1: Write the failing tests for `portal_archive.py`**
+
+Create `tests/test_portal_archive.py`:
+
+```python
+import json
+from datetime import datetime
+
+import portal_archive
+
+
+def test_read_last_run_returns_none_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal_archive, "LAST_RUN_PATH", tmp_path / "last_run.json")
+    assert portal_archive.read_last_run() is None
+
+
+def test_save_and_read_last_run_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal_archive, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(portal_archive, "LAST_RUN_PATH", tmp_path / "last_run.json")
+
+    portal_archive.save_last_run(datetime(2026, 9, 5, 18, 0, 0))
+
+    assert portal_archive.read_last_run() == datetime(2026, 9, 5, 18, 0, 0)
+
+
+def test_compute_portal_cutoff_uses_last_run_when_present(monkeypatch):
+    saved = datetime(2026, 9, 4, 19, 30)
+    monkeypatch.setattr(portal_archive, "read_last_run", lambda: saved)
+    assert portal_archive.compute_portal_cutoff() == saved
+
+
+def test_compute_portal_cutoff_falls_back_to_month_anchor_when_absent(monkeypatch):
+    monkeypatch.setattr(portal_archive, "read_last_run", lambda: None)
+    from cutoff import month_anchor
+    assert portal_archive.compute_portal_cutoff() == month_anchor()
+
+
+def test_load_archive_returns_empty_list_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal_archive, "ARCHIVE_PATH", tmp_path / "portal_messages.json")
+    assert portal_archive.load_archive() == []
+
+
+def test_merge_into_archive_dedupes_by_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal_archive, "ARCHIVE_PATH", tmp_path / "portal_messages.json")
+    existing = [
+        {"id": "1", "title": "old version", "posted_at": "2026-09-01T10:00:00", "body": "b", "attachments": []},
+    ]
+    (tmp_path / "portal_messages.json").write_text(json.dumps(existing))
+
+    new_messages = [
+        {"id": "1", "title": "updated version", "posted_at": "2026-09-01T10:00:00", "body": "b", "attachments": []},
+        {"id": "2", "title": "new message", "posted_at": "2026-09-05T10:00:00", "body": "b2", "attachments": []},
+    ]
+
+    merged = portal_archive.merge_into_archive(new_messages)
+
+    assert len(merged) == 2
+    ids = {m["id"] for m in merged}
+    assert ids == {"1", "2"}
+    updated = next(m for m in merged if m["id"] == "1")
+    assert updated["title"] == "updated version"
+
+
+def test_merge_into_archive_sorts_most_recent_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal_archive, "ARCHIVE_PATH", tmp_path / "portal_messages.json")
+    new_messages = [
+        {"id": "a", "title": "t", "posted_at": "2026-09-01T10:00:00", "body": "b", "attachments": []},
+        {"id": "b", "title": "t", "posted_at": "2026-09-05T10:00:00", "body": "b", "attachments": []},
+    ]
+    merged = portal_archive.merge_into_archive(new_messages)
+    assert [m["id"] for m in merged] == ["b", "a"]
+
+
+def test_save_archive_writes_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(portal_archive, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(portal_archive, "ARCHIVE_PATH", tmp_path / "portal_messages.json")
+    messages = [{"id": "1", "title": "t", "posted_at": "2026-09-05T10:00:00", "body": "b", "attachments": []}]
+
+    portal_archive.save_archive(messages)
+
+    assert json.loads((tmp_path / "portal_messages.json").read_text()) == messages
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_portal_archive.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'portal_archive'`
+
+- [ ] **Step 3: Create `portal_archive.py`**
+
+```python
+"""
+Persists the portal message archive and a "last run" cursor in this git
+repo itself (under data/), instead of an external store like Google
+Drive - so this data survives across scheduled-cloud-routine runs, as
+long as whoever invokes daily_brief.py commits and pushes data/
+afterward (see the daily-school-brief skill, which does this as an
+explicit step).
+
+Unlike the WhatsApp side (whose Drive log already retains full history
+on its own), the portal's activity page shows an unknown retention
+window, so daily_brief.py builds its own permanent archive here: every
+message ever scraped, deduplicated by message id, merged with each new
+fetch. The brief is always generated from the FULL archive, never just
+the newest fetch, so nothing posted at any point in the past is ever
+missed once cursor efficiency is reintroduced.
+
+Cutoff logic: if no cursor has been saved yet (fresh setup, or the
+data/ directory was reset), fall back to cutoff.month_anchor() so a
+start-of-month document is still caught on the first run. Otherwise,
+use the last run's timestamp - only fetch what's new, merge it into the
+archive, and advance the cursor.
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+from dateutil import parser as dateparser
+
+from cutoff import month_anchor
+
+DATA_DIR = Path(__file__).parent / "data"
+ARCHIVE_PATH = DATA_DIR / "portal_messages.json"
+LAST_RUN_PATH = DATA_DIR / "last_run.json"
+
+
+def read_last_run() -> datetime | None:
+    if not LAST_RUN_PATH.exists():
+        return None
+    data = json.loads(LAST_RUN_PATH.read_text())
+    raw = data.get("last_run")
+    if not raw:
+        return None
+    return dateparser.parse(raw)
+
+
+def save_last_run(dt: datetime) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    LAST_RUN_PATH.write_text(json.dumps({"last_run": dt.isoformat()}, indent=2))
+
+
+def compute_portal_cutoff() -> datetime:
+    last_run = read_last_run()
+    if last_run is not None:
+        return last_run
+    return month_anchor()
+
+
+def load_archive() -> list[dict]:
+    if not ARCHIVE_PATH.exists():
+        return []
+    return json.loads(ARCHIVE_PATH.read_text())
+
+
+def merge_into_archive(new_messages: list[dict]) -> list[dict]:
+    existing = load_archive()
+    by_id = {m["id"]: m for m in existing}
+    for m in new_messages:
+        by_id[m["id"]] = m
+    merged = list(by_id.values())
+    merged.sort(key=lambda m: m["posted_at"], reverse=True)
+    return merged
+
+
+def save_archive(messages: list[dict]) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    ARCHIVE_PATH.write_text(json.dumps(messages, indent=2, ensure_ascii=False))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_portal_archive.py -v`
+Expected: PASS (8 tests)
+
+- [ ] **Step 5: Simplify `cutoff.py`**
+
+`compute_cutoff()` is no longer called by anything (WhatsApp will call
+`month_anchor()` directly; the portal now has its own
+`portal_archive.compute_portal_cutoff()`) — remove it to avoid dead
+code. Replace the full contents of `cutoff.py` with:
+
+```python
+"""
+Computes the shared month-start cutoff used for the orchestrated
+daily-brief pipeline's WhatsApp fetch, and as the portal's fallback
+cutoff when no cursor has been recorded yet (see portal_archive.py):
+always 2 days before the start of the current calendar month.
+
+Using "start of month minus 2 days" (rather than exactly day 1) gives
+slack for a message posted right at the month boundary and guards
+against clock/timezone edge cases.
+"""
+
+from datetime import datetime, timedelta
+
+
+def month_anchor(today: datetime | None = None) -> datetime:
+    """2 days before the start of the current calendar month."""
+    if today is None:
+        today = datetime.now()
+    month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start - timedelta(days=2)
+```
+
+Replace `tests/test_cutoff.py` in full (drops the now-obsolete
+`test_compute_cutoff_returns_month_anchor`):
+
+```python
+from datetime import datetime
+
+import cutoff
+
+
+def test_month_anchor_is_two_days_before_month_start():
+    today = datetime(2026, 9, 15, 12, 30)
+    result = cutoff.month_anchor(today)
+    assert result == datetime(2026, 8, 30, 0, 0, 0)
+
+
+def test_month_anchor_handles_january_rollover():
+    today = datetime(2026, 1, 10)
+    result = cutoff.month_anchor(today)
+    assert result == datetime(2025, 12, 30, 0, 0, 0)
+```
+
+- [ ] **Step 6: Run the full suite to verify everything passes**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests — note `daily_brief.py` still imports
+`compute_cutoff` from `cutoff` at this point, which will now fail; that
+import is fixed in Task 18, not here. If `tests/test_daily_brief.py`
+fails to even collect because of this, that's expected and will be
+resolved by Task 18 — don't try to fix `daily_brief.py` in this task.)
+
+- [ ] **Step 7: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend). It's fine if `daily_brief.py` is
+temporarily broken between this commit and Task 18's — note this
+clearly in the commit message so it's not mistaken for an accident.
+
+---
+
+### Task 18: Redirect PDFs to `data/pdfs/`; wire `daily_brief.py` to the portal archive
+
+**Files:**
+- Modify: `scrape_udt.py`
+- Modify: `daily_brief.py`
+- Modify: `tests/test_daily_brief.py`
+
+- [ ] **Step 1: Update `scrape_udt.py`'s `PDF_DIR`**
+
+Replace the CONFIG section's `OUTPUT_DIR`/`PDF_DIR` lines:
+
+```python
+OUTPUT_DIR = Path(__file__).parent / "output"
+OUTPUT_DIR.mkdir(exist_ok=True)
+PDF_DIR = OUTPUT_DIR / "pdfs"
+PDF_DIR.mkdir(exist_ok=True)
+```
+
+with:
+
+```python
+OUTPUT_DIR = Path(__file__).parent / "output"
+OUTPUT_DIR.mkdir(exist_ok=True)
+PDF_DIR = Path(__file__).parent / "data" / "pdfs"
+PDF_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+This is the only change to `scrape_udt.py` — `download_message_attachments`
+itself is unchanged (it already just writes to `PDF_DIR`, wherever that
+points).
+
+- [ ] **Step 2: Run the existing scrape_udt tests to verify they still pass**
+
+Run: `.venv/bin/python -m pytest tests/test_scrape_udt.py -v`
+Expected: PASS (all existing tests monkeypatch `scrape_udt.PDF_DIR`
+directly to a `tmp_path`, so this default-value change doesn't affect
+them)
+
+- [ ] **Step 3: Write the failing tests for `daily_brief.py`'s new wiring**
+
+Replace `tests/test_daily_brief.py` in full:
+
+```python
+import json
+
+import daily_brief
+
+
+def test_gather_captures_portal_error(monkeypatch):
+    def failing_fetch(**kwargs):
+        raise RuntimeError("login failed")
+
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["error"] == "RuntimeError: login failed"
+    assert result["portal"]["messages"] == []
+    assert result["whatsapp"]["error"] is None
+
+
+def test_gather_merges_and_saves_archive_on_portal_success(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"id": "new", "title": "x"}])
+    monkeypatch.setattr(
+        daily_brief,
+        "merge_into_archive",
+        lambda new: [{"id": "new", "title": "x"}, {"id": "old", "title": "y"}],
+    )
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: saved.setdefault("archive", archive))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["messages"] == [{"id": "new", "title": "x"}, {"id": "old", "title": "y"}]
+    assert saved["archive"] == [{"id": "new", "title": "x"}, {"id": "old", "title": "y"}]
+    assert "last_run" in saved
+
+
+def test_gather_does_not_save_archive_or_cursor_on_portal_failure(monkeypatch):
+    saved = {}
+
+    def failing_fetch(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: saved.setdefault("archive", archive))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    daily_brief.gather()
+
+    assert "archive" not in saved
+    assert "last_run" not in saved
+
+
+def test_gather_captures_whatsapp_error(monkeypatch):
+    def failing_fetch(**kwargs):
+        raise RuntimeError("drive unreachable")
+
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
+    monkeypatch.setattr(daily_brief, "merge_into_archive", lambda new: [])
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: None)
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", failing_fetch)
+
+    result = daily_brief.gather()
+
+    assert result["whatsapp"]["error"] == "RuntimeError: drive unreachable"
+    assert result["portal"]["error"] is None
+
+
+def test_gather_uses_month_anchor_for_whatsapp_cutoff(monkeypatch):
+    from cutoff import month_anchor as real_month_anchor
+
+    calls = {}
+
+    def fake_whatsapp_fetch(**kwargs):
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
+    monkeypatch.setattr(daily_brief, "merge_into_archive", lambda new: [])
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: None)
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", fake_whatsapp_fetch)
+
+    daily_brief.gather()
+
+    assert calls["cutoff"] == real_month_anchor()
+
+
+def test_gather_uses_portal_cutoff_and_downloads_attachments(monkeypatch):
+    calls = {}
+
+    def fake_fetch(**kwargs):
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", fake_fetch)
+    monkeypatch.setattr(daily_brief, "merge_into_archive", lambda new: [])
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: None)
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    daily_brief.gather()
+
+    assert calls["cutoff"] == "fixed-cutoff"
+    assert calls["download_attachments"] is True
+
+
+def test_run_writes_output_file(monkeypatch, tmp_path):
+    fixed_result = {
+        "portal": {"messages": [], "error": None},
+        "whatsapp": {"messages": [], "error": None},
+    }
+    monkeypatch.setattr(daily_brief, "gather", lambda: fixed_result)
+    out_path = tmp_path / "out.json"
+    monkeypatch.setattr(daily_brief, "OUTPUT_PATH", out_path)
+
+    result = daily_brief.run()
+
+    assert out_path.exists()
+    assert json.loads(out_path.read_text()) == result == fixed_result
+```
+
+- [ ] **Step 4: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_daily_brief.py -v`
+Expected: FAIL — `AttributeError` (`daily_brief` has no attribute
+`compute_portal_cutoff`/`merge_into_archive`/etc. yet; it currently
+imports `compute_cutoff` from `cutoff`, which no longer exists after
+Task 17).
+
+- [ ] **Step 5: Update `daily_brief.py`**
+
+Replace the full contents with:
+
+```python
+"""
+Gathers filtered messages from the school portal and the WhatsApp log,
+and writes a single JSON envelope for the daily-school-brief skill to
+read and turn into a categorized brief.
+
+Each source is best-effort: if one fails, its `error` field is set and
+`messages` is empty, so the skill can still produce a partial brief
+rather than nothing.
+
+WhatsApp always uses cutoff.month_anchor() (its Drive log already
+retains its own full history, so re-scanning the current month is
+enough, and it stays intentionally decoupled from the portal's cursor).
+The portal uses portal_archive.py's cursor-or-month-anchor cutoff, merges
+newly-fetched messages into the git-committed archive
+(data/portal_messages.json), and always returns the FULL merged archive
+here - not just the newest fetch - so nothing scraped in the past is
+ever missed. The cursor (data/last_run.json) and archive are only
+updated when the portal fetch itself succeeds. Portal attachments are
+downloaded into data/pdfs/ (skipping already-downloaded files).
+
+Note: data/ must be committed and pushed after this runs for the
+archive/cursor to persist across a scheduled cloud routine's fresh
+clones - see the daily-school-brief skill, which does this.
+
+USAGE:
+    python daily_brief.py
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any, TypedDict
+
+from cutoff import month_anchor
+from fetch_whatsapp import fetch_recent_whatsapp_messages
+from portal_archive import compute_portal_cutoff, merge_into_archive, save_archive, save_last_run
+from scrape_udt import fetch_recent_messages
+
+OUTPUT_PATH = Path(__file__).parent / "output" / "daily_brief_input.json"
+
+
+class SourceResult(TypedDict):
+    messages: list[Any]
+    error: str | None
+
+
+def gather() -> dict[str, SourceResult]:
+    run_started_at = datetime.now()
+    result: dict[str, SourceResult] = {
+        "portal": {"messages": [], "error": None},
+        "whatsapp": {"messages": [], "error": None},
+    }
+
+    try:
+        portal_cutoff = compute_portal_cutoff()
+        new_messages = fetch_recent_messages(cutoff=portal_cutoff, download_attachments=True)
+        full_archive = merge_into_archive(new_messages)
+        save_archive(full_archive)
+        save_last_run(run_started_at)
+        result["portal"]["messages"] = full_archive
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
+        result["portal"]["error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(cutoff=month_anchor())
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
+        result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
+
+    return result
+
+
+def run():
+    data = gather()
+    OUTPUT_PATH.parent.mkdir(exist_ok=True)
+    OUTPUT_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    print(f"Wrote {OUTPUT_PATH}")
+    return data
+
+
+if __name__ == "__main__":
+    run()
+```
+
+- [ ] **Step 6: Run the full suite to verify everything passes**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests across every file)
+
+- [ ] **Step 7: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
+
+---
+
+### Task 19: Skill commits `data/`; README updated
+
+**Files:**
+- Modify: `.claude/skills/daily-school-brief/SKILL.md`
+- Modify: `README.md`
+
+- [ ] **Step 1: Update the skill**
+
+Replace the full contents of `.claude/skills/daily-school-brief/SKILL.md`
+with:
+
+```markdown
+---
+name: daily-school-brief
+description: Generate the daily school brief (homework, tomorrow's agenda, dress code, other reminders) from the school portal and WhatsApp group logs, and push a notification with it. Use when asked to run or generate the daily school brief, or on the scheduled evening trigger.
+---
+
+# Daily School Brief
+
+## What this does
+
+Combines two message sources - the school web portal (with a permanent,
+git-committed archive of every message ever scraped) and the school
+WhatsApp group (captured via phone automation into a Google Drive file,
+covering a couple days before the start of the current calendar month
+onward) - and produces a short brief covering:
+
+- Homework
+- Tomorrow's school agenda (events, holidays, notices)
+- Tomorrow's dress code
+- Other reminders
+
+Then sends the brief as a push notification.
+
+## Steps
+
+1. From the project root, run:
+
+   ```bash
+   python daily_brief.py
+   ```
+
+   The project root is the directory containing `daily_brief.py`,
+   `scrape_udt.py`, and `fetch_whatsapp.py`. If you're not already
+   there (e.g. in a fresh clone on a scheduled cloud routine), `cd`
+   into it first before running the command.
+
+   This writes `output/daily_brief_input.json` with two sections,
+   `portal` and `whatsapp`, each having `messages` (a list) and `error`
+   (a string or null). The portal's `messages` list is the FULL
+   accumulated archive (every message ever scraped), not just what's
+   new this run. Portal messages may include an `attachments` list; a
+   downloaded attachment has a `saved_as` local file path.
+
+   If `python daily_brief.py` fails to run (crashes, `python` not
+   found, etc.) or `output/daily_brief_input.json` does not exist
+   afterward, don't stop silently - send a push notification saying
+   the daily brief couldn't be generated, including a short reason if
+   one is available, and stop there.
+
+2. Commit and push any changes under `data/` (the portal message
+   archive, cursor, and downloaded PDFs) so they persist for the next
+   run:
+
+   ```bash
+   git add data/
+   git diff --cached --quiet || git commit -m "Update portal archive"
+   git push
+   ```
+
+   This is necessary because a scheduled cloud routine clones this repo
+   fresh on every run - anything written to `data/` during this run is
+   lost unless it's committed and pushed back before the run ends. If
+   this step fails (e.g. no push access), note it as a warning in the
+   brief, but continue - a failure here doesn't affect today's brief,
+   only whether tomorrow's run starts from today's updated archive.
+
+3. Read `output/daily_brief_input.json` (path relative to the project
+   root from step 1 - this only works if you're actually in that
+   directory when you run step 1).
+
+4. For each portal message that has an attachment with a `saved_as`
+   path, `Read` that file directly (Claude Code's `Read` tool handles
+   PDFs natively). Homework, agenda, and dress-code details are often
+   inside the document itself - a monthly planner PDF, for instance -
+   rather than in the message body text, so don't rely on the body
+   text alone when an attachment is present.
+
+5. For each source with a non-null `error`, note it as a warning to
+   include at the top of the brief (e.g. "couldn't reach school
+   portal") - a failure in one source should not stop you from using
+   the other source's messages.
+
+6. If both sources have zero messages and no errors, the brief is just:
+   "Nothing new from the school portal or WhatsApp group."
+
+7. Otherwise, read through all messages (and any attachment content
+   read in step 4) from both sources and use your own judgment to
+   extract (the content is unstructured free text - don't pattern-match
+   on fixed keywords):
+   - **Homework**: any assignment, reading, or task mentioned for the
+     child to do.
+   - **Tomorrow's agenda**: events, special activities, holidays, timing
+     changes, or notices that apply to tomorrow specifically (use
+     today's date in IST - India Standard Time, UTC+5:30, the school's
+     timezone - to work out what "tomorrow" refers to; do not use the
+     local timezone of the machine or sandbox running this skill).
+     Content posted at any point in the past (e.g. a monthly planner
+     from weeks ago) that happens to apply to tomorrow counts just as
+     much as something posted today - the portal archive is complete,
+     so don't assume only recent messages matter.
+   - **Dress code**: any uniform/dress instructions that apply tomorrow
+     (e.g. "sports day, wear house colors", "PE kit tomorrow").
+   - **Other reminders**: anything else worth a parent's attention (fee
+     due dates, forms to sign, items to bring) that doesn't fit the
+     above.
+   Omit a section entirely if there's nothing for it, rather than
+   forcing an empty slot.
+
+8. Compose the brief as plain text with short section headers. This is
+   a draft/internal step - it's fine for this draft to span multiple
+   lines and sections.
+
+9. Condense that draft into the actual notification message: the
+   PushNotification tool requires a single line of plain text with no
+   markdown formatting. Send it with `status: "proactive"`, `message`
+   = the condensed brief. Mobile OSes truncate long notifications, so
+   keep the single line under ~200 characters where possible - lead
+   with the most time-sensitive items (tomorrow's dress code, homework
+   due tomorrow) first, since anything after that point may get cut
+   off if the full brief would run longer.
+```
+
+- [ ] **Step 2: Sanity-check the frontmatter still parses**
+
+Run: `.venv/bin/python -c "import yaml; print(yaml.safe_load(open('.claude/skills/daily-school-brief/SKILL.md').read().split('---')[1]))"`
+Expected: prints a dict with `name`/`description` keys, no errors.
+
+- [ ] **Step 3: Update `README.md`**
+
+Replace the full contents with:
+
+```markdown
+# Daily School Brief
+
+Pulls together messages from the school web portal and (via phone-forwarded
+messages synced through Google Drive) the school WhatsApp group, and
+produces a daily brief covering homework, tomorrow's agenda, tomorrow's
+dress code, and other reminders.
+
+See `docs/superpowers/specs/2026-09-05-daily-school-brief-design.md` for the
+full design and `docs/superpowers/plans/2026-09-05-daily-school-brief.md`
+for the implementation plan and current build status.
+
+## Components
+
+- **`scrape_udt.py`** — logs into the UDT eSchool parent portal, fetches
+  the activity/messages page, parses each message (title, author, date,
+  body, PDF attachments), and filters to a rolling lookback window (default
+  36 hours) when run standalone. Downloads PDF attachments into
+  `data/pdfs/`, skipping any file that's already been saved there (by
+  message ID + name), so the same document isn't re-downloaded every
+  run. Can be run directly (`python scrape_udt.py`), or imported
+  (`fetch_recent_messages()`) for use by other scripts.
+- **`fetch_whatsapp.py`** — reads WhatsApp group messages forwarded via
+  phone automation into a JSONL file on Google Drive (see
+  `docs/PHONE_SETUP.md`), via the Google Drive API using a service
+  account, filtered to the same rolling lookback window (standalone) or
+  the orchestrated pipeline's month-start cutoff.
+- **`cutoff.py`** — `month_anchor()`: 2 days before the start of the
+  current calendar month. Used directly for the WhatsApp fetch (its
+  Drive log already retains its own full history, so re-scanning the
+  current month is enough), and as `portal_archive.py`'s fallback when
+  no portal cursor has been recorded yet.
+- **`portal_archive.py`** — persists the portal message archive
+  (`data/portal_messages.json`, deduplicated by message id) and a
+  "last run" cursor (`data/last_run.json`) in this git repo. The
+  orchestrated pipeline fetches only what's new since the cursor (or
+  since `month_anchor()` on a fresh setup), merges it into the archive,
+  and always considers the FULL archive when generating the brief — so
+  nothing scraped at any point in the past is ever dropped.
+- **`daily_brief.py`** — orchestrator that calls both fetchers (portal
+  via `portal_archive.py`'s cutoff, WhatsApp via `cutoff.month_anchor()`),
+  treating each as best-effort (one source failing doesn't block the
+  other), downloads portal attachments, and writes a combined JSON
+  envelope to `output/daily_brief_input.json`.
+- The `daily-school-brief` Claude Code skill
+  (`.claude/skills/daily-school-brief/SKILL.md`) reads that envelope,
+  `Read`s any downloaded PDF attachments directly (homework/agenda/
+  dress-code details are often inside the document, not just the message
+  text), commits and pushes `data/` so the archive/cursor persist across
+  future runs, categorizes everything into homework / tomorrow's agenda
+  / dress code / other reminders, and sends a push notification with the
+  brief. A scheduled cloud routine runs this automatically each evening.
+
+## Setup
+
+1. Create a virtual environment (recommended, optional):
+   ```
+   python3 -m venv venv
+   source venv/bin/activate   # on Windows: venv\Scripts\activate
+   ```
+
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+
+3. Set up your credentials:
+   ```
+   cp .env.example .env
+   ```
+   Then edit `.env` and fill in your real `UDT_USERNAME`, `UDT_PASSWORD`,
+   desired `LOOKBACK_HOURS` (default 36, only used for standalone runs),
+   and — once the WhatsApp side is set up — `GOOGLE_SERVICE_ACCOUNT_JSON`
+   and `WHATSAPP_DRIVE_FILE_ID`.
+   **Never commit `.env`** - it's already in `.gitignore`.
+
+## Run
+
+- Portal scraper only (saves messages + downloads PDFs):
+  ```
+  python scrape_udt.py
+  ```
+- WhatsApp fetcher only (prints recent messages):
+  ```
+  python fetch_whatsapp.py
+  ```
+- Full pipeline (writes the combined brief-input JSON, merges the portal
+  archive, downloads portal attachments):
+  ```
+  python daily_brief.py
+  ```
+  After running this as part of the scheduled/automated flow, `data/`
+  needs to be committed and pushed for the archive/cursor to persist —
+  see the `daily-school-brief` skill, which does this automatically.
+
+## Output
+
+- `output/messages_<timestamp>.json` — all parsed portal messages within
+  the lookback window, with title, author/date, body text, and attachment
+  info (written by `scrape_udt.py`'s standalone `run()`). Not committed
+  (gitignored, under `output/`).
+- `output/daily_brief_input.json` — combined `{"portal": {...}, "whatsapp":
+  {...}}` envelope written by `daily_brief.py`, each side having
+  `messages` and `error` fields. Not committed.
+- `data/portal_messages.json` — the permanent portal message archive,
+  deduplicated by message id. Committed to this repo.
+- `data/last_run.json` — the portal cursor (`{"last_run": "<isoformat>"}`).
+  Committed to this repo.
+- `data/pdfs/` — downloaded PDF (or other) attachments, named using the
+  message ID and their display name in the portal. Committed to this
+  repo; a file already present here is not re-downloaded.
+
+## Notes
+
+- All portal messages currently load on a single page load (no pagination
+  or infinite-scroll fetching) — if the school portal changes this in the
+  future, the script will silently only see what's in that first page
+  load and may need extending.
+- Portal login is a plain form POST to `/Logins/index` with `username`/
+  `password` fields — if the school changes their login page (adds a
+  CSRF token, captcha, etc.) this script will need updating to match.
+- PDF attachments are fetched by following each attachment's viewer page
+  and extracting the real file URL from an embedded `file_path` JS
+  variable, then downloading that URL directly (skipped if already
+  downloaded).
+- WhatsApp messages are captured entirely through Android's normal
+  notification system (via phone automation), not through any unofficial
+  WhatsApp client library — see the design spec for why.
+- `data/` grows without pruning over time (portal messages, cursor, and
+  PDFs are never deleted) — acceptable for a personal single-class
+  project, but worth knowing if this is reused somewhere with much higher
+  message/attachment volume.
+```
+
+- [ ] **Step 4: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
