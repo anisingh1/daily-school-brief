@@ -195,6 +195,10 @@ def fetch_recent_messages(lookback_hours: float | None = None, download_attachme
     session.headers.update(HEADERS)
     login(session)
     all_messages = fetch_activity_messages(session)
+    if not all_messages:
+        print("No messages parsed - the page structure may differ from what "
+              "was inspected, or login didn't actually succeed. Inspect "
+              "activity_resp.text manually if this happens.")
     filtered = filter_recent(all_messages, lookback_hours)
     if download_attachments:
         download_message_attachments(session, filtered)

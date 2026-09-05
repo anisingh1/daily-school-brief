@@ -53,3 +53,86 @@ def test_login_raises_on_failed_login():
 
     with pytest.raises(RuntimeError):
         login(FakeSession())
+
+
+class _FakeSession:
+    def __init__(self):
+        self.headers = {}
+
+
+class _FakeRequests:
+    """Stand-in for the `requests` module, patched onto scrape_udt so
+    fetch_recent_messages() gets our fake session instead of a real one."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def Session(self):
+        return self._session
+
+
+def test_fetch_recent_messages_raises_on_login_failure(monkeypatch):
+    import scrape_udt
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(scrape_udt, "requests", _FakeRequests(fake_session))
+
+    def fake_login(session):
+        raise RuntimeError("login failed")
+
+    monkeypatch.setattr(scrape_udt, "login", fake_login)
+
+    with pytest.raises(RuntimeError):
+        scrape_udt.fetch_recent_messages(lookback_hours=36)
+
+
+def test_fetch_recent_messages_returns_filtered_without_downloading_by_default(monkeypatch):
+    import scrape_udt
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(scrape_udt, "requests", _FakeRequests(fake_session))
+    monkeypatch.setattr(scrape_udt, "login", lambda session: None)
+    monkeypatch.setattr(
+        scrape_udt,
+        "fetch_activity_messages",
+        lambda session: [_msg(1, "recent"), _msg(40, "old")],
+    )
+
+    download_calls = []
+    monkeypatch.setattr(
+        scrape_udt,
+        "download_message_attachments",
+        lambda session, messages: download_calls.append(messages),
+    )
+
+    result = scrape_udt.fetch_recent_messages(lookback_hours=36)
+
+    assert [m["id"] for m in result] == ["recent"]
+    assert download_calls == []
+
+
+def test_fetch_recent_messages_downloads_attachments_when_requested(monkeypatch):
+    import scrape_udt
+
+    fake_session = _FakeSession()
+    monkeypatch.setattr(scrape_udt, "requests", _FakeRequests(fake_session))
+    monkeypatch.setattr(scrape_udt, "login", lambda session: None)
+    monkeypatch.setattr(
+        scrape_udt,
+        "fetch_activity_messages",
+        lambda session: [_msg(1, "recent")],
+    )
+
+    download_calls = []
+    monkeypatch.setattr(
+        scrape_udt,
+        "download_message_attachments",
+        lambda session, messages: download_calls.append((session, messages)),
+    )
+
+    result = scrape_udt.fetch_recent_messages(lookback_hours=36, download_attachments=True)
+
+    assert len(download_calls) == 1
+    called_session, called_messages = download_calls[0]
+    assert called_session is fake_session
+    assert called_messages == result
