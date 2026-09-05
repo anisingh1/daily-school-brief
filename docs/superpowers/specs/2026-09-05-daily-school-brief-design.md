@@ -134,6 +134,16 @@ already retains full history on its own, so there's no equivalent
 problem to solve, and no reason to couple its cutoff to the portal's
 advancing cursor.
 
+**Retention:** committing PDFs to git means the repo's binary history
+grows forever (a plain delete doesn't reclaim space without a history
+rewrite), so the portal archive is pruned each run: messages (and their
+attachment files, if any) older than **2 calendar months** are dropped
+from `data/portal_messages.json` and deleted from `data/pdfs/` before
+saving. This happens after merging in new messages but before the brief
+is generated, so the brief never sees pruned content. This is
+portal-only — WhatsApp's Drive log isn't owned or modified by this
+project, so it isn't pruned here.
+
 **Critical operational requirement**: the scheduled cloud routine clones
 this repo fresh on every run (see "Scheduling & delivery" below). Local
 writes to `data/` during a run only exist in that run's ephemeral clone
