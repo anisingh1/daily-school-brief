@@ -57,3 +57,33 @@ def test_render_escapes_html_special_characters():
     html = render_brief_html(_base_data(homework=["Read <Chapter 3> & write notes"]))
     assert "<Chapter 3>" not in html
     assert "&lt;Chapter 3&gt;" in html
+
+
+def test_render_normalizes_bare_string_list_field_to_single_item():
+    html = render_brief_html(_base_data(homework="Read pages 10-12"))
+    assert html.count("<li") == 1
+    assert "Read pages 10-12" in html
+
+
+def test_render_omits_homework_section_when_all_items_blank():
+    html = render_brief_html(_base_data(homework=[""]))
+    assert "Homework" not in html
+
+
+def test_render_omits_dress_code_section_when_whitespace_only():
+    html = render_brief_html(_base_data(dress_code="   "))
+    assert "Dress Code" not in html
+
+
+def test_render_shows_nothing_new_message_when_all_fields_blank_variants():
+    html = render_brief_html(
+        _base_data(
+            warnings=[""],
+            aviraj_highlight="   ",
+            homework=["  "],
+            agenda=[],
+            dress_code="",
+            reminders=[""],
+        )
+    )
+    assert "Nothing new" in html

@@ -16,6 +16,23 @@ Expected `data` keys: `date` (str), `warnings` (list[str]),
 
 from html import escape
 
+
+def _as_list(value) -> list[str]:
+    """Normalize a list-typed field that may arrive as a bare string.
+
+    The upstream skill produces `data` via LLM judgment, so a single-item
+    field could plausibly come out as a bare string instead of a
+    single-element list. Iterating a bare string directly would silently
+    produce one <li> per character, so callers should always route
+    list-typed fields through this helper first.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
 _COLORS = {
     "header_bg": "#4338CA",
     "header_text": "#FFFFFF",
@@ -35,6 +52,7 @@ _COLORS = {
 
 
 def _section(title: str, accent: str, items: list[str]) -> str:
+    items = [item for item in items if item and item.strip()]
     if not items:
         return ""
     rows = "".join(
@@ -54,12 +72,16 @@ def _section(title: str, accent: str, items: list[str]) -> str:
 
 def render_brief_html(data: dict) -> str:
     date = data.get("date", "")
-    warnings = data.get("warnings") or []
+    warnings = [w for w in _as_list(data.get("warnings")) if w and w.strip()]
     aviraj_highlight = data.get("aviraj_highlight")
-    homework = data.get("homework") or []
-    agenda = data.get("agenda") or []
+    aviraj_highlight = (
+        aviraj_highlight if aviraj_highlight and aviraj_highlight.strip() else None
+    )
+    homework = _as_list(data.get("homework"))
+    agenda = _as_list(data.get("agenda"))
     dress_code = data.get("dress_code")
-    reminders = data.get("reminders") or []
+    dress_code = dress_code if dress_code and dress_code.strip() else None
+    reminders = _as_list(data.get("reminders"))
 
     warning_html = ""
     if warnings:
@@ -105,6 +127,7 @@ def render_brief_html(data: dict) -> str:
 
     return f"""<!DOCTYPE html>
 <html>
+  <head><meta charset="utf-8"></head>
   <body style="margin: 0; padding: 24px; background: {_COLORS['page_bg']};
                font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;">
     <div style="max-width: 600px; margin: 0 auto; background: {_COLORS['card_bg']};
