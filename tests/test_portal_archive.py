@@ -66,6 +66,20 @@ def test_merge_into_archive_sorts_most_recent_first(tmp_path, monkeypatch):
     assert [m["id"] for m in merged] == ["b", "a"]
 
 
+def test_merge_into_archive_does_not_collapse_messages_with_empty_id(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(portal_archive, "ARCHIVE_PATH", tmp_path / "portal_messages.json")
+    new_messages = [
+        {"id": "", "title": "no id one", "posted_at": "2026-09-01T10:00:00", "body": "b", "attachments": []},
+        {"id": "", "title": "no id two", "posted_at": "2026-09-05T10:00:00", "body": "b2", "attachments": []},
+    ]
+
+    merged = portal_archive.merge_into_archive(new_messages)
+
+    assert len(merged) == 2
+    titles = {m["title"] for m in merged}
+    assert titles == {"no id one", "no id two"}
+
+
 def test_save_archive_writes_json(tmp_path, monkeypatch):
     monkeypatch.setattr(portal_archive, "DATA_DIR", tmp_path)
     monkeypatch.setattr(portal_archive, "ARCHIVE_PATH", tmp_path / "portal_messages.json")

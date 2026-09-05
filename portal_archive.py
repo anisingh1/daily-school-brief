@@ -64,10 +64,16 @@ def load_archive() -> list[dict]:
 
 def merge_into_archive(new_messages: list[dict]) -> list[dict]:
     existing = load_archive()
-    by_id = {m["id"]: m for m in existing}
-    for m in new_messages:
-        by_id[m["id"]] = m
-    merged = list(by_id.values())
+    by_id: dict[str, dict] = {}
+    no_id: list[dict] = []
+    for m in existing + new_messages:
+        msg_id = m.get("id")
+        if msg_id:
+            by_id[msg_id] = m
+        else:
+            print(f"Warning: message with empty id cannot be deduplicated: {m.get('title', '<no title>')}")
+            no_id.append(m)
+    merged = list(by_id.values()) + no_id
     merged.sort(key=lambda m: m["posted_at"], reverse=True)
     return merged
 
