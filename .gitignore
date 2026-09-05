@@ -6,4 +6,3 @@ __pycache__/
 venv/
 .claude/settings.json
 .claude/settings.local.json
-.vscode/
