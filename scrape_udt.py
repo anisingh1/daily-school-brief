@@ -142,8 +142,13 @@ def fetch_activity_messages(session) -> list[dict]:
     return extract_messages(activity_resp.text)
 
 
-def filter_recent(messages: list[dict], lookback_hours: float) -> list[dict]:
-    cutoff = datetime.now() - timedelta(hours=lookback_hours)
+def filter_recent(
+    messages: list[dict], lookback_hours: float | None = None, cutoff: datetime | None = None
+) -> list[dict]:
+    if cutoff is None:
+        if lookback_hours is None:
+            lookback_hours = LOOKBACK_HOURS
+        cutoff = datetime.now() - timedelta(hours=lookback_hours)
     filtered = [
         m for m in messages
         if dateparser.parse(m["posted_at"]) >= cutoff
@@ -184,12 +189,14 @@ def download_message_attachments(session, messages: list[dict]) -> None:
                 att["note"] = f"Download failed: {e}"
 
 
-def fetch_recent_messages(lookback_hours: float | None = None, download_attachments: bool = False) -> list[dict]:
-    """Log in, fetch the activity page, and return messages posted within
-    the rolling lookback window (hours), most recent first. Raises
-    RuntimeError if login fails."""
-    if lookback_hours is None:
-        lookback_hours = LOOKBACK_HOURS
+def fetch_recent_messages(
+    lookback_hours: float | None = None,
+    cutoff: datetime | None = None,
+    download_attachments: bool = False,
+) -> list[dict]:
+    """Log in, fetch the activity page, and return messages posted since
+    `cutoff` if given, else within the rolling lookback window (hours),
+    most recent first. Raises RuntimeError if login fails."""
     session = requests.Session()
     session.headers.update(HEADERS)
     login(session)
@@ -198,7 +205,7 @@ def fetch_recent_messages(lookback_hours: float | None = None, download_attachme
         print("No messages parsed - the page structure may differ from what "
               "was inspected, or login didn't actually succeed. Inspect "
               "activity_resp.text manually if this happens.")
-    filtered = filter_recent(all_messages, lookback_hours)
+    filtered = filter_recent(all_messages, lookback_hours=lookback_hours, cutoff=cutoff)
     if download_attachments:
         download_message_attachments(session, filtered)
     return filtered

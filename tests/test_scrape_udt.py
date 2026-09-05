@@ -38,6 +38,20 @@ def test_filter_recent_sorts_most_recent_first():
     assert [m["id"] for m in result] == ["b", "c", "a"]
 
 
+def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():
+    from scrape_udt import filter_recent
+
+    cutoff = datetime(2026, 9, 4, 12, 0, 0)
+    messages = [
+        {"id": "in", "title": "t", "posted_at": (cutoff + timedelta(hours=1)).isoformat(), "body": "b", "attachments": []},
+        {"id": "out", "title": "t", "posted_at": (cutoff - timedelta(hours=1)).isoformat(), "body": "b", "attachments": []},
+    ]
+    # lookback_hours=1000 would normally include both if it were used -
+    # confirming cutoff, not lookback_hours, governs the result.
+    result = filter_recent(messages, lookback_hours=1000, cutoff=cutoff)
+    assert [m["id"] for m in result] == ["in"]
+
+
 def test_login_raises_on_failed_login():
     from scrape_udt import login
 
