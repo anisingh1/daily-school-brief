@@ -9,8 +9,8 @@ description: Generate the daily school brief (homework, tomorrow's agenda, dress
 
 Combines two message sources - the school web portal and the school
 WhatsApp group (captured via phone automation into a Google Drive file)
-- covering everything since the start of the current calendar month, and
-produces a short brief covering:
+- covering everything since a couple days before the start of the
+current calendar month, and produces a short brief covering:
 
 - Homework
 - Tomorrow's school agenda (events, holidays, notices)
