@@ -173,16 +173,21 @@ def download_message_attachments(session, messages: list[dict]) -> None:
                     continue
 
                 file_url = match.group(1).replace("\\/", "/")
-                file_resp = session.get(file_url)
-                content_type = file_resp.headers.get("content-type", "")
-
-                ext = ".pdf" if "pdf" in content_type.lower() or file_url.lower().endswith(".pdf") else ""
-                if not ext and "." in file_url.rsplit("/", 1)[-1]:
+                ext = ""
+                if "." in file_url.rsplit("/", 1)[-1]:
                     ext = "." + file_url.rsplit(".", 1)[-1]
-
                 safe_name = re.sub(r"[^\w\-. ]", "_", att["name"]) + ext
-                (PDF_DIR / safe_name).write_bytes(file_resp.content)
-                att["saved_as"] = str(PDF_DIR / safe_name)
+                dest_path = PDF_DIR / safe_name
+
+                if dest_path.exists():
+                    att["saved_as"] = str(dest_path)
+                    att["source_url"] = file_url
+                    att["note"] = "Already downloaded"
+                    continue
+
+                file_resp = session.get(file_url)
+                dest_path.write_bytes(file_resp.content)
+                att["saved_as"] = str(dest_path)
                 att["source_url"] = file_url
             except Exception as e:
                 att["saved_as"] = None

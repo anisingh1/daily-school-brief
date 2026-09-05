@@ -7,24 +7,24 @@ Each source is best-effort: if one fails, its `error` field is set and
 `messages` is empty, so the skill can still produce a partial brief
 rather than nothing.
 
-Uses a Google-Drive-persisted cursor (see drive_state.py) so each run
-only looks back as far as the last successful run, falling back to a
-month-anchor floor (2 days before the start of the current month) when
-no cursor is available yet - this guarantees a start-of-month monthly
-planner PDF is never missed on a fresh setup or after a gap. The cursor
-is only advanced when BOTH sources succeed, so a failure causes the next
-run to retry the same window rather than silently losing data.
+Uses a fixed month-start cutoff (see cutoff.py) rather than a persisted
+cursor: the portal and WhatsApp log both already retain their own full
+history, so re-fetching and re-filtering the whole month every run is
+cheap and guarantees a start-of-month monthly planner PDF - or anything
+else posted earlier in the month - is never missed, no matter how many
+days later it becomes relevant. Portal attachments are downloaded (with
+already-downloaded files skipped) so the skill can read PDF content
+directly.
 
 USAGE:
     python daily_brief.py
 """
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
-from drive_state import compute_cutoff, save_last_run
+from cutoff import compute_cutoff
 from fetch_whatsapp import fetch_recent_whatsapp_messages
 from scrape_udt import fetch_recent_messages
 
@@ -37,7 +37,6 @@ class SourceResult(TypedDict):
 
 
 def gather() -> dict[str, SourceResult]:
-    run_started_at = datetime.now()  # noqa: DTZ005 - naive on purpose: fetch_recent_messages compares it against naive portal timestamps; fetch_recent_whatsapp_messages attaches tz itself when needed
     cutoff = compute_cutoff()
     result: dict[str, SourceResult] = {
         "portal": {"messages": [], "error": None},
@@ -45,7 +44,7 @@ def gather() -> dict[str, SourceResult]:
     }
 
     try:
-        result["portal"]["messages"] = fetch_recent_messages(cutoff=cutoff, download_attachments=False)
+        result["portal"]["messages"] = fetch_recent_messages(cutoff=cutoff, download_attachments=True)
     except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
         result["portal"]["error"] = f"{type(e).__name__}: {e}"
 
@@ -53,9 +52,6 @@ def gather() -> dict[str, SourceResult]:
         result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(cutoff=cutoff)
     except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
         result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
-
-    if result["portal"]["error"] is None and result["whatsapp"]["error"] is None:
-        save_last_run(run_started_at)
 
     return result
 

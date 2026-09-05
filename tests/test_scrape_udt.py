@@ -150,3 +150,59 @@ def test_fetch_recent_messages_downloads_attachments_when_requested(monkeypatch)
     called_session, called_messages = download_calls[0]
     assert called_session is fake_session
     assert called_messages == result
+
+
+def test_download_message_attachments_skips_already_downloaded_file(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+    existing_file = tmp_path / "Homework.pdf"
+    existing_file.write_bytes(b"old content")
+
+    class FakeViewerResponse:
+        text = 'var file_path = "http://example.com/files/homework.pdf";'
+
+    class FakeSession:
+        def __init__(self):
+            self.get_calls = []
+
+        def get(self, url):
+            self.get_calls.append(url)
+            return FakeViewerResponse()
+
+    session = FakeSession()
+    messages = [{"attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+
+    scrape_udt.download_message_attachments(session, messages)
+
+    assert messages[0]["attachments"][0]["saved_as"] == str(existing_file)
+    assert messages[0]["attachments"][0]["note"] == "Already downloaded"
+    assert existing_file.read_bytes() == b"old content"
+    assert len(session.get_calls) == 1
+
+
+def test_download_message_attachments_downloads_new_file(tmp_path, monkeypatch):
+    import scrape_udt
+
+    monkeypatch.setattr(scrape_udt, "PDF_DIR", tmp_path)
+
+    class FakeViewerResponse:
+        text = 'var file_path = "http://example.com/files/homework.pdf";'
+
+    class FakeFileResponse:
+        content = b"pdf bytes"
+
+    class FakeSession:
+        def get(self, url):
+            if "viewer" in url:
+                return FakeViewerResponse()
+            return FakeFileResponse()
+
+    messages = [{"attachments": [{"name": "Homework", "href": "/viewer/1"}]}]
+
+    scrape_udt.download_message_attachments(FakeSession(), messages)
+
+    saved_path = tmp_path / "Homework.pdf"
+    assert saved_path.exists()
+    assert saved_path.read_bytes() == b"pdf bytes"
+    assert messages[0]["attachments"][0]["saved_as"] == str(saved_path)

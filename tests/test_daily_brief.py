@@ -1,5 +1,4 @@
 import json
-from datetime import datetime
 
 import daily_brief
 
@@ -8,8 +7,7 @@ def test_gather_captures_portal_error(monkeypatch):
     def failing_fetch(**kwargs):
         raise RuntimeError("login failed")
 
-    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
-    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
     monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
     monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
 
@@ -22,8 +20,7 @@ def test_gather_captures_portal_error(monkeypatch):
 
 
 def test_gather_returns_messages_on_success(monkeypatch):
-    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
-    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
     monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"title": "x"}])
     monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [{"text": "y"}])
 
@@ -39,8 +36,7 @@ def test_gather_captures_whatsapp_error(monkeypatch):
     def failing_fetch(**kwargs):
         raise RuntimeError("drive unreachable")
 
-    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
-    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
     monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
     monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", failing_fetch)
 
@@ -50,32 +46,21 @@ def test_gather_captures_whatsapp_error(monkeypatch):
     assert result["portal"]["error"] is None
 
 
-def test_gather_saves_cursor_only_when_both_sources_succeed(monkeypatch):
-    saved = {}
-    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
-    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("called_with", dt))
-    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
+def test_gather_downloads_portal_attachments_with_shared_cutoff(monkeypatch):
+    calls = {}
+
+    def fake_fetch(**kwargs):
+        calls.update(kwargs)
+        return []
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", fake_fetch)
     monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
 
     daily_brief.gather()
 
-    assert "called_with" in saved
-
-
-def test_gather_does_not_save_cursor_when_a_source_fails(monkeypatch):
-    saved = {}
-
-    def failing_fetch(**kwargs):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
-    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("called_with", dt))
-    monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
-    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
-
-    daily_brief.gather()
-
-    assert "called_with" not in saved
+    assert calls["download_attachments"] is True
+    assert calls["cutoff"] == "fixed-cutoff"
 
 
 def test_run_writes_output_file(monkeypatch, tmp_path):
