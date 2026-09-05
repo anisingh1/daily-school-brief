@@ -22,30 +22,36 @@ USAGE:
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any, TypedDict
 
-from scrape_udt import fetch_recent_messages
-from fetch_whatsapp import fetch_recent_whatsapp_messages
 from drive_state import compute_cutoff, save_last_run
+from fetch_whatsapp import fetch_recent_whatsapp_messages
+from scrape_udt import fetch_recent_messages
 
 OUTPUT_PATH = Path(__file__).parent / "output" / "daily_brief_input.json"
 
 
-def gather() -> dict:
-    run_started_at = datetime.now()
+class SourceResult(TypedDict):
+    messages: list[Any]
+    error: str | None
+
+
+def gather() -> dict[str, SourceResult]:
+    run_started_at = datetime.now()  # noqa: DTZ005 - naive on purpose: fetch_recent_messages compares it against naive portal timestamps; fetch_recent_whatsapp_messages attaches tz itself when needed
     cutoff = compute_cutoff()
-    result = {
+    result: dict[str, SourceResult] = {
         "portal": {"messages": [], "error": None},
         "whatsapp": {"messages": [], "error": None},
     }
 
     try:
         result["portal"]["messages"] = fetch_recent_messages(cutoff=cutoff, download_attachments=False)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
         result["portal"]["error"] = f"{type(e).__name__}: {e}"
 
     try:
         result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(cutoff=cutoff)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
         result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
 
     if result["portal"]["error"] is None and result["whatsapp"]["error"] is None:
