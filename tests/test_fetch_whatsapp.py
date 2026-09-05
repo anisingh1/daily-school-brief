@@ -80,3 +80,19 @@ def test_filter_recent_skips_entry_with_overflow_timestamp():
     messages = [{"timestamp": "99999999999999999999", "sender": "A", "text": "bad"}]
     result = filter_recent(messages, lookback_hours=36)
     assert result == []
+
+
+def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():
+    from fetch_whatsapp import filter_recent
+
+    cutoff = datetime(2026, 9, 4, 12, 0, 0).astimezone()
+    just_after = (cutoff + timedelta(minutes=1)).isoformat()
+    just_before = (cutoff - timedelta(minutes=1)).isoformat()
+    messages = [
+        {"timestamp": just_after, "sender": "A", "text": "in"},
+        {"timestamp": just_before, "sender": "A", "text": "out"},
+    ]
+    # lookback_hours=1000 would normally include both if it were used -
+    # confirming cutoff, not lookback_hours, governs the result.
+    result = filter_recent(messages, lookback_hours=1000, cutoff=cutoff)
+    assert [m["text"] for m in result] == ["in"]
