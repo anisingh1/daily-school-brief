@@ -3505,3 +3505,519 @@ with:
 
 Commit with a descriptive message (normal `git add`/`git commit`/`git
 push`, no force-push, no amend).
+
+---
+
+## Addendum 5: HTML email delivery replaces push notification
+
+See the spec's "Delivery: HTML email, not push" section for rationale.
+Summary: push notifications are plain text and can't render styled,
+sectioned HTML, and also depend on Remote Control being connected, which
+isn't guaranteed for an unattended scheduled run. This addendum splits
+the brief generator into two concerns: the skill still uses its own
+judgment to categorize messages (unchanged), but now writes that
+categorization as structured JSON (`output/daily_brief_content.json`)
+instead of composing free-text HTML itself. A new, deterministic,
+tested Python module renders that structured data into a polished HTML
+email, and a second module sends it via Gmail SMTP.
+
+### Task 21: `render_email.py` - structured content to styled HTML
+
+**Files:**
+- Create: `render_email.py`
+- Test: `tests/test_render_email.py` (new)
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_render_email.py`:
+
+```python
+from render_email import render_brief_html
+
+
+def _base_data(**overrides):
+    data = {
+        "date": "2026-09-05",
+        "warnings": [],
+        "aviraj_highlight": None,
+        "homework": [],
+        "agenda": [],
+        "dress_code": None,
+        "reminders": [],
+    }
+    data.update(overrides)
+    return data
+
+
+def test_render_includes_homework_section_when_present():
+    html = render_brief_html(_base_data(homework=["Read pages 10-12"]))
+    assert "Homework" in html
+    assert "Read pages 10-12" in html
+
+
+def test_render_omits_empty_sections():
+    html = render_brief_html(_base_data(agenda=["Skill Analysis day"]))
+    assert "Homework" not in html
+    assert "Dress Code" not in html
+    assert "Skill Analysis day" in html
+
+
+def test_render_shows_nothing_new_message_when_all_empty():
+    html = render_brief_html(_base_data())
+    assert "Nothing new" in html
+
+
+def test_render_includes_warnings_banner():
+    html = render_brief_html(_base_data(warnings=["WhatsApp fetch failed"]))
+    assert "WhatsApp fetch failed" in html
+
+
+def test_render_includes_aviraj_highlight():
+    html = render_brief_html(
+        _base_data(aviraj_highlight="Aviraj is presenting show and tell tomorrow")
+    )
+    assert "Aviraj is presenting show and tell tomorrow" in html
+
+
+def test_render_includes_dress_code_section_when_present():
+    html = render_brief_html(
+        _base_data(dress_code="Swimming dress (Tuesday is swim day)")
+    )
+    assert "Dress Code" in html
+    assert "Swimming dress (Tuesday is swim day)" in html
+
+
+def test_render_escapes_html_special_characters():
+    html = render_brief_html(_base_data(homework=["Read <Chapter 3> & write notes"]))
+    assert "<Chapter 3>" not in html
+    assert "&lt;Chapter 3&gt;" in html
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_render_email.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'render_email'`
+
+- [ ] **Step 3: Create `render_email.py`**
+
+```python
+"""
+Renders the daily school brief's structured content into a polished,
+section-based HTML email body.
+
+Takes a structured dict (produced by the daily-school-brief skill's own
+judgment/categorization step - see
+.claude/skills/daily-school-brief/SKILL.md) rather than raw scraped
+messages, so the visual design is deterministic and consistent every day
+regardless of that day's content. Claude decides *what* goes in the
+brief; this module decides *how it looks*.
+
+Expected `data` keys: `date` (str), `warnings` (list[str]),
+`aviraj_highlight` (str | None), `homework` (list[str]), `agenda`
+(list[str]), `dress_code` (str | None), `reminders` (list[str]).
+"""
+
+from html import escape
+
+_COLORS = {
+    "header_bg": "#4338CA",
+    "header_text": "#FFFFFF",
+    "page_bg": "#F3F4F6",
+    "card_bg": "#FFFFFF",
+    "text": "#1F2937",
+    "muted": "#6B7280",
+    "warning_bg": "#FEF3C7",
+    "warning_border": "#F59E0B",
+    "highlight_bg": "#FEF9C3",
+    "highlight_border": "#CA8A04",
+    "homework_accent": "#2563EB",
+    "agenda_accent": "#7C3AED",
+    "dress_accent": "#EA580C",
+    "reminders_accent": "#059669",
+}
+
+
+def _section(title: str, accent: str, items: list[str]) -> str:
+    if not items:
+        return ""
+    rows = "".join(
+        f'<li style="margin: 0 0 8px 0; line-height: 1.5;">{escape(item)}</li>'
+        for item in items
+    )
+    return f"""
+    <div style="margin: 0 0 24px 0; padding: 16px 20px; background: #FAFAFA;
+                border-left: 4px solid {accent}; border-radius: 4px;">
+      <h2 style="margin: 0 0 8px 0; font-size: 16px; color: {_COLORS['text']};">
+        {escape(title)}
+      </h2>
+      <ul style="margin: 0; padding-left: 20px;">{rows}</ul>
+    </div>
+    """
+
+
+def render_brief_html(data: dict) -> str:
+    date = data.get("date", "")
+    warnings = data.get("warnings") or []
+    aviraj_highlight = data.get("aviraj_highlight")
+    homework = data.get("homework") or []
+    agenda = data.get("agenda") or []
+    dress_code = data.get("dress_code")
+    reminders = data.get("reminders") or []
+
+    warning_html = ""
+    if warnings:
+        items = "".join(f"<li>{escape(w)}</li>" for w in warnings)
+        warning_html = f"""
+        <div style="margin: 0 0 20px 0; padding: 12px 16px; background: {_COLORS['warning_bg']};
+                    border-left: 4px solid {_COLORS['warning_border']}; border-radius: 4px;
+                    font-size: 14px; color: {_COLORS['text']};">
+          <strong>⚠️ Heads up:</strong>
+          <ul style="margin: 4px 0 0 0; padding-left: 20px;">{items}</ul>
+        </div>
+        """
+
+    highlight_html = ""
+    if aviraj_highlight:
+        highlight_html = f"""
+        <div style="margin: 0 0 20px 0; padding: 16px 20px; background: {_COLORS['highlight_bg']};
+                    border-left: 4px solid {_COLORS['highlight_border']}; border-radius: 4px;
+                    font-size: 15px; font-weight: 600; color: {_COLORS['text']};">
+          ⭐ {escape(aviraj_highlight)}
+        </div>
+        """
+
+    dress_html = ""
+    if dress_code:
+        dress_html = _section("👕 Dress Code", _COLORS["dress_accent"], [dress_code])
+
+    body = "".join([
+        warning_html,
+        highlight_html,
+        _section("📚 Homework", _COLORS["homework_accent"], homework),
+        _section("📅 Tomorrow's Agenda", _COLORS["agenda_accent"], agenda),
+        dress_html,
+        _section("🔔 Other Reminders", _COLORS["reminders_accent"], reminders),
+    ])
+
+    if not body.strip():
+        body = f"""
+        <p style="font-size: 15px; color: {_COLORS['muted']};">
+          Nothing new from the school portal or WhatsApp group.
+        </p>
+        """
+
+    return f"""<!DOCTYPE html>
+<html>
+  <body style="margin: 0; padding: 24px; background: {_COLORS['page_bg']};
+               font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;">
+    <div style="max-width: 600px; margin: 0 auto; background: {_COLORS['card_bg']};
+                border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+      <div style="background: {_COLORS['header_bg']}; color: {_COLORS['header_text']};
+                  padding: 20px 24px;">
+        <h1 style="margin: 0; font-size: 20px;">🎒 Daily School Brief</h1>
+        <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.85;">{escape(date)}</p>
+      </div>
+      <div style="padding: 24px;">
+        {body}
+      </div>
+      <div style="padding: 16px 24px; background: {_COLORS['page_bg']};
+                  font-size: 12px; color: {_COLORS['muted']}; text-align: center;">
+        Generated automatically from the school portal and WhatsApp group.
+      </div>
+    </div>
+  </body>
+</html>"""
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_render_email.py -v`
+Expected: PASS (7 tests)
+
+- [ ] **Step 5: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
+
+---
+
+### Task 22: `send_email.py` - Gmail SMTP sender + CLI entry point
+
+**Files:**
+- Create: `send_email.py`
+- Test: `tests/test_send_email.py` (new)
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_send_email.py`:
+
+```python
+import pytest
+
+import send_email
+
+
+def test_send_brief_email_raises_when_not_configured(monkeypatch):
+    monkeypatch.setattr(send_email, "SMTP_USERNAME", None)
+    monkeypatch.setattr(send_email, "SMTP_APP_PASSWORD", None)
+    monkeypatch.setattr(send_email, "EMAIL_TO", None)
+    with pytest.raises(RuntimeError):
+        send_email.send_brief_email("subject", "<p>body</p>")
+
+
+def test_send_brief_email_sends_via_smtp(monkeypatch):
+    monkeypatch.setattr(send_email, "SMTP_USERNAME", "me@gmail.com")
+    monkeypatch.setattr(send_email, "SMTP_APP_PASSWORD", "app-pass")
+    monkeypatch.setattr(send_email, "EMAIL_TO", "family@gmail.com")
+
+    calls = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port):
+            calls["host"] = host
+            calls["port"] = port
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def starttls(self):
+            calls["starttls"] = True
+
+        def login(self, username, password):
+            calls["login"] = (username, password)
+
+        def sendmail(self, from_addr, to_addrs, msg):
+            calls["sendmail"] = (from_addr, to_addrs)
+            calls["msg_contains_html"] = "<p>body</p>" in msg
+
+    monkeypatch.setattr(send_email.smtplib, "SMTP", FakeSMTP)
+
+    send_email.send_brief_email("Test Subject", "<p>body</p>")
+
+    assert calls["host"] == "smtp.gmail.com"
+    assert calls["starttls"] is True
+    assert calls["login"] == ("me@gmail.com", "app-pass")
+    assert calls["sendmail"] == ("me@gmail.com", ["family@gmail.com"])
+    assert calls["msg_contains_html"] is True
+
+
+def test_run_reads_content_renders_and_sends(tmp_path, monkeypatch):
+    monkeypatch.setattr(send_email, "CONTENT_PATH", tmp_path / "daily_brief_content.json")
+    (tmp_path / "daily_brief_content.json").write_text(
+        '{"date": "2026-09-05", "warnings": [], "aviraj_highlight": null, '
+        '"homework": [], "agenda": [], "dress_code": null, "reminders": []}'
+    )
+
+    calls = {}
+    monkeypatch.setattr(send_email, "render_brief_html", lambda data: "<html>fake</html>")
+    monkeypatch.setattr(
+        send_email,
+        "send_brief_email",
+        lambda subject, html: calls.update({"subject": subject, "html": html}),
+    )
+
+    send_email.run()
+
+    assert calls["subject"] == "Daily School Brief - 2026-09-05"
+    assert calls["html"] == "<html>fake</html>"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_send_email.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'send_email'`
+
+- [ ] **Step 3: Create `send_email.py`**
+
+```python
+"""
+Sends the daily school brief as an HTML email via Gmail SMTP.
+
+The skill (.claude/skills/daily-school-brief/SKILL.md) writes its
+categorized brief content to output/daily_brief_content.json; this
+script reads that file, renders it into HTML via render_email.py, and
+sends it - keeping "what to say" (Claude's judgment, in the skill),
+"how it looks" (render_email.py), and "how to send it" (this module)
+as separate concerns.
+
+SETUP:
+    - Create a Gmail App Password: Google Account -> Security -> 2-Step
+      Verification -> App passwords (requires 2FA enabled on the account).
+    - Set SMTP_USERNAME (the Gmail address) and SMTP_APP_PASSWORD (the
+      16-character app password, not your regular Gmail password) in .env.
+    - Set EMAIL_TO (the recipient address) in .env.
+
+USAGE:
+    python send_email.py
+"""
+
+import json
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from render_email import render_brief_html
+
+load_dotenv()
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+CONTENT_PATH = Path(__file__).parent / "output" / "daily_brief_content.json"
+
+
+def send_brief_email(subject: str, html_body: str) -> None:
+    if not SMTP_USERNAME or not SMTP_APP_PASSWORD or not EMAIL_TO:
+        raise RuntimeError(
+            "SMTP_USERNAME, SMTP_APP_PASSWORD, and/or EMAIL_TO are not set."
+        )
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USERNAME
+    msg["To"] = EMAIL_TO
+    msg.attach(MIMEText(html_body, "html"))
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
+        server.sendmail(SMTP_USERNAME, [EMAIL_TO], msg.as_string())
+
+
+def run() -> None:
+    data = json.loads(CONTENT_PATH.read_text())
+    html = render_brief_html(data)
+    subject = f"Daily School Brief - {data.get('date', '')}"
+    send_brief_email(subject, html)
+    print(f"Email sent to {EMAIL_TO}")
+
+
+if __name__ == "__main__":
+    run()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_send_email.py -v`
+Expected: PASS (3 tests)
+
+- [ ] **Step 5: Run the full suite**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests across every file)
+
+- [ ] **Step 6: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
+
+---
+
+### Task 23: Wire the skill to write structured content + send email; update `.env.example`/`README.md`
+
+**Files:**
+- Modify: `.claude/skills/daily-school-brief/SKILL.md`
+- Modify: `.env.example`
+- Modify: `README.md`
+
+- [ ] **Step 1: Replace `.claude/skills/daily-school-brief/SKILL.md`'s final steps**
+
+Keep steps 1-7 of the skill file (fetch, commit `data/`, read the JSON,
+read PDFs, categorization rules including Aviraj/roster/dress-code/5-day
+rules already in place) exactly as they currently are. Replace steps 8-9
+(the "compose plain text" / "condense and send push notification" steps)
+with:
+
+```markdown
+8. Assemble the categorization from step 7 into a single structured
+   JSON object with these exact keys:
+   - `date`: a short human-readable label for what this brief covers,
+     e.g. `"Monday, September 7, 2026"` (the date `tomorrow` refers to
+     in IST).
+   - `warnings`: list of strings, one per source that had a non-null
+     `error` (from step 5) - empty list if none.
+   - `aviraj_highlight`: a single string if a message specifically named
+     Aviraj (from the highlight rule above), otherwise `null`.
+   - `homework`: list of strings, one per homework item - empty list if
+     none.
+   - `agenda`: list of strings, one per tomorrow's-agenda item - empty
+     list if none.
+   - `dress_code`: a single string (the effective dress-code instruction
+     for tomorrow, after applying the override rule above), or `null` if
+     nothing applies.
+   - `reminders`: list of strings, one per other-reminder item within the
+     5-day window - empty list if none.
+
+   Write this object as JSON to `output/daily_brief_content.json`.
+
+9. Run:
+
+   ```bash
+   python send_email.py
+   ```
+
+   This reads `output/daily_brief_content.json`, renders it into a
+   styled HTML email (see `render_email.py`), and sends it via Gmail
+   SMTP to the configured recipient (`EMAIL_TO` in `.env`). If this
+   command fails (e.g. SMTP credentials not configured, network error),
+   report the failure - don't treat it as if the brief was delivered.
+```
+
+- [ ] **Step 2: Sanity-check the frontmatter still parses**
+
+Run: `.venv/bin/python -c "import yaml; print(yaml.safe_load(open('.claude/skills/daily-school-brief/SKILL.md').read().split('---')[1]))"`
+Expected: prints a dict with `name`/`description` keys, no errors.
+
+- [ ] **Step 3: Update `.env.example`**
+
+Add these lines at the end of the file:
+
+```
+# Gmail SMTP, for sending the daily brief as an HTML email (see
+# send_email.py). SMTP_APP_PASSWORD is a Gmail App Password (Google
+# Account -> Security -> 2-Step Verification -> App passwords), NOT
+# your regular Gmail password - it requires 2FA to be enabled first.
+SMTP_USERNAME=your_gmail_address@gmail.com
+SMTP_APP_PASSWORD=your_16_character_app_password
+EMAIL_TO=recipient@example.com
+```
+
+- [ ] **Step 4: Update `README.md`**
+
+In the "Components" section, add a bullet after the `daily_brief.py`
+bullet (before the skill bullet):
+
+```
+- **`render_email.py`** — pure function, `render_brief_html(data)`,
+  turning the skill's structured categorization (`output/daily_brief_content.json`)
+  into a polished, sectioned HTML email body. Deterministic and tested,
+  so visual quality is consistent every day regardless of that day's
+  content.
+- **`send_email.py`** — reads `output/daily_brief_content.json`, renders
+  it via `render_email.py`, and sends it as an HTML email via Gmail SMTP.
+```
+
+Update the skill's own bullet (the one describing what it does) to say
+it writes structured content and sends an email, not a push notification
+- replace "sends a push notification with the brief" with "writes
+`output/daily_brief_content.json` and runs `send_email.py` to send it as
+an HTML email".
+
+In the "Setup" section's step 3, add to the list of `.env` values to
+fill in: "and `SMTP_USERNAME`/`SMTP_APP_PASSWORD`/`EMAIL_TO` for sending
+the brief by email (see `send_email.py`'s docstring for how to create a
+Gmail App Password)".
+
+- [ ] **Step 5: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
