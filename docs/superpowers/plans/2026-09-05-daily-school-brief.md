@@ -848,6 +848,10 @@ it's solved.
 
 ### Task 10: End-to-end dry run
 
+> Note: attempt this after Tasks 11-14 below (the cross-run cursor
+> addendum), since those tasks change how `daily_brief.py` computes its
+> cutoff. Task 10 as originally written still applies otherwise.
+
 **Files:**
 - None - verification only.
 
@@ -874,3 +878,800 @@ notification chain works end-to-end outside your Mac.
 
 Once both dry runs succeed, let the routine run naturally the next few
 evenings and confirm the push notifications arrive as expected.
+
+---
+
+## Addendum: Cross-run cursor (revises "no persisted cursor" decision)
+
+See the spec's "Cross-run cursor" section for the full rationale. Summary:
+a Google-Drive-persisted `last_run` cursor replaces the plain 36h rolling
+window for the *orchestrated* pipeline (`daily_brief.py`), falling back to
+a month-anchor floor (2 days before the start of the current calendar
+month) when no cursor exists yet - so a start-of-month monthly planner
+PDF is never missed on a fresh setup or after a gap. Standalone script
+usage (`python scrape_udt.py` / `python fetch_whatsapp.py` run directly)
+is unaffected and keeps using `LOOKBACK_HOURS`.
+
+### Task 11: Shared `google_drive.py` module + refactor `fetch_whatsapp.py`
+
+**Files:**
+- Create: `google_drive.py`
+- Modify: `fetch_whatsapp.py`
+- Test: `tests/test_google_drive.py` (new)
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_google_drive.py`:
+
+```python
+import json
+
+import google_drive
+
+
+def test_build_client_uses_file_path_branch(monkeypatch, tmp_path):
+    key_file = tmp_path / "key.json"
+    key_file.write_text("{}")
+    calls = {}
+
+    def fake_from_file(path, scopes):
+        calls["file_path"] = path
+        return "fake-creds-from-file"
+
+    def fake_build(service, version, credentials):
+        calls["credentials"] = credentials
+        return "fake-client"
+
+    monkeypatch.setattr(
+        google_drive.service_account.Credentials, "from_service_account_file", fake_from_file
+    )
+    monkeypatch.setattr(google_drive, "build", fake_build)
+
+    result = google_drive.build_client(str(key_file))
+
+    assert result == "fake-client"
+    assert calls["file_path"] == str(key_file)
+    assert calls["credentials"] == "fake-creds-from-file"
+
+
+def test_build_client_uses_raw_json_branch(monkeypatch):
+    raw_json = json.dumps({"type": "service_account"})
+    calls = {}
+
+    def fake_from_info(info, scopes):
+        calls["info"] = info
+        return "fake-creds-from-info"
+
+    def fake_build(service, version, credentials):
+        calls["credentials"] = credentials
+        return "fake-client"
+
+    monkeypatch.setattr(
+        google_drive.service_account.Credentials, "from_service_account_info", fake_from_info
+    )
+    monkeypatch.setattr(google_drive, "build", fake_build)
+
+    result = google_drive.build_client(raw_json)
+
+    assert result == "fake-client"
+    assert calls["info"] == {"type": "service_account"}
+    assert calls["credentials"] == "fake-creds-from-info"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_google_drive.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'google_drive'`
+
+- [ ] **Step 3: Create `google_drive.py`**
+
+```python
+"""
+Shared Google Drive API helpers: building an authenticated client from a
+service account (file path or raw JSON key content), and
+downloading/uploading small text files by ID.
+
+Used by both fetch_whatsapp.py (reads the WhatsApp JSONL log) and
+drive_state.py (reads/writes the cross-run cursor).
+"""
+
+import io
+import json
+import os
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+
+SCOPES = ["https://www.googleapis.com/auth/drive"]
+
+
+def build_client(service_account_json: str):
+    if os.path.isfile(service_account_json):
+        credentials = service_account.Credentials.from_service_account_file(
+            service_account_json, scopes=SCOPES
+        )
+    else:
+        info = json.loads(service_account_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=SCOPES
+        )
+    return build("drive", "v3", credentials=credentials)
+
+
+def download_text(drive_service, file_id: str) -> str:
+    request = drive_service.files().get_media(fileId=file_id)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buffer.getvalue().decode("utf-8")
+
+
+def upload_text(drive_service, file_id: str, text: str) -> None:
+    media = MediaIoBaseUpload(io.BytesIO(text.encode("utf-8")), mimetype="text/plain")
+    drive_service.files().update(fileId=file_id, media_body=media).execute()
+```
+
+- [ ] **Step 4: Run the new tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_google_drive.py -v`
+Expected: PASS (2 tests)
+
+- [ ] **Step 5: Refactor `fetch_whatsapp.py` to use `google_drive.py`, and add an optional `cutoff` parameter**
+
+Replace the full contents of `fetch_whatsapp.py` with:
+
+```python
+"""
+Fetches WhatsApp group messages forwarded via phone automation.
+
+Messages are captured by a MacroDroid rule on an Android phone (see
+docs/PHONE_SETUP.md) which appends one JSON line per message to a file
+in a Google Drive folder. This module reads that file via the Drive API
+using a service account (see google_drive.py) and filters to a rolling
+lookback window, or an explicit absolute cutoff when one is provided
+(used by daily_brief.py's cross-run cursor - see drive_state.py).
+
+SETUP:
+    - Create a Google Cloud service account with Drive API access.
+    - Share the Drive folder containing the WhatsApp log file with the
+      service account's email as Viewer.
+    - Set GOOGLE_SERVICE_ACCOUNT_JSON (a file path, or the raw JSON key
+      content) and WHATSAPP_DRIVE_FILE_ID (the Drive file ID of the
+      JSONL log) in .env.
+
+USAGE:
+    python fetch_whatsapp.py
+"""
+
+import json
+import os
+from datetime import datetime, timedelta
+
+from dateutil import parser as dateparser
+from dotenv import load_dotenv
+
+import google_drive
+
+load_dotenv()
+
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+DRIVE_FILE_ID = os.getenv("WHATSAPP_DRIVE_FILE_ID")
+LOOKBACK_HOURS = float(os.getenv("LOOKBACK_HOURS", "36"))
+
+
+def parse_jsonl(text: str) -> list[dict]:
+    messages = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            messages.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return messages
+
+
+def filter_recent(
+    messages: list[dict], lookback_hours: float | None = None, cutoff: datetime | None = None
+) -> list[dict]:
+    if cutoff is None:
+        if lookback_hours is None:
+            lookback_hours = LOOKBACK_HOURS
+        cutoff = datetime.now().astimezone() - timedelta(hours=lookback_hours)
+    filtered = []
+    for m in messages:
+        raw_ts = m.get("timestamp")
+        if not raw_ts:
+            continue
+        try:
+            ts = dateparser.parse(raw_ts)
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.astimezone()
+        if ts >= cutoff:
+            filtered.append(m)
+    filtered.sort(key=lambda m: dateparser.parse(m["timestamp"]).astimezone())
+    return filtered
+
+
+def fetch_recent_whatsapp_messages(
+    lookback_hours: float | None = None, cutoff: datetime | None = None
+) -> list[dict]:
+    if not SERVICE_ACCOUNT_JSON or not DRIVE_FILE_ID:
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON and/or WHATSAPP_DRIVE_FILE_ID are not set."
+        )
+    drive_service = google_drive.build_client(SERVICE_ACCOUNT_JSON)
+    text = google_drive.download_text(drive_service, DRIVE_FILE_ID)
+    messages = parse_jsonl(text)
+    return filter_recent(messages, lookback_hours=lookback_hours, cutoff=cutoff)
+
+
+if __name__ == "__main__":
+    for msg in fetch_recent_whatsapp_messages():
+        print(msg)
+```
+
+This removes `fetch_whatsapp.py`'s own `_drive_client`/`download_jsonl_text`
+(now in `google_drive.py`) and its own `SCOPES` (now `google_drive.SCOPES`,
+broadened from `drive.readonly` to full `drive` access, needed because
+`drive_state.py` in Task 12 writes to a Drive file with the same service
+account). Per-file access is still governed by Drive sharing permissions
+(Viewer vs Editor), not by this OAuth scope alone.
+
+- [ ] **Step 6: Run the full suite to verify nothing broke**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all existing tests, e.g. `test_fetch_whatsapp.py`'s 7
+tests, plus the 2 new `test_google_drive.py` tests — no regressions from
+the refactor, since `parse_jsonl`/`filter_recent`'s existing behavior for
+the `lookback_hours` path is unchanged, only the internal Drive-client
+wiring moved).
+
+- [ ] **Step 7: Add a test for the new `cutoff` override path**
+
+Add `timedelta` to the existing `from datetime import datetime, timedelta`
+import line at the top of `tests/test_fetch_whatsapp.py` (it currently
+only imports `datetime`), then add this test:
+
+```python
+def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():
+    from fetch_whatsapp import filter_recent
+
+    cutoff = datetime(2026, 9, 4, 12, 0, 0).astimezone()
+    just_after = (cutoff + timedelta(minutes=1)).isoformat()
+    just_before = (cutoff - timedelta(minutes=1)).isoformat()
+    messages = [
+        {"timestamp": just_after, "sender": "A", "text": "in"},
+        {"timestamp": just_before, "sender": "A", "text": "out"},
+    ]
+    # lookback_hours=1000 would normally include both if it were used -
+    # confirming cutoff, not lookback_hours, governs the result.
+    result = filter_recent(messages, lookback_hours=1000, cutoff=cutoff)
+    assert [m["text"] for m in result] == ["in"]
+```
+
+Run: `.venv/bin/python -m pytest tests/test_fetch_whatsapp.py -v`
+Expected: PASS (8 tests)
+
+---
+
+### Task 12: New `drive_state.py` module (cross-run cursor + month-anchor fallback)
+
+**Files:**
+- Create: `drive_state.py`
+- Test: `tests/test_drive_state.py` (new)
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_drive_state.py`:
+
+```python
+import json
+from datetime import datetime, timedelta
+
+import drive_state
+
+
+def test_month_anchor_is_two_days_before_month_start():
+    today = datetime(2026, 9, 15, 12, 30)
+    result = drive_state.month_anchor(today)
+    assert result == datetime(2026, 8, 30, 0, 0, 0)
+
+
+def test_month_anchor_handles_january_rollover():
+    today = datetime(2026, 1, 10)
+    result = drive_state.month_anchor(today)
+    assert result == datetime(2025, 12, 30, 0, 0, 0)
+
+
+def test_read_last_run_returns_none_when_not_configured(monkeypatch):
+    monkeypatch.setattr(drive_state, "SERVICE_ACCOUNT_JSON", None)
+    monkeypatch.setattr(drive_state, "STATE_DRIVE_FILE_ID", None)
+    assert drive_state.read_last_run() is None
+
+
+def test_read_last_run_returns_none_for_empty_state_file(monkeypatch):
+    monkeypatch.setattr(drive_state, "SERVICE_ACCOUNT_JSON", "fake")
+    monkeypatch.setattr(drive_state, "STATE_DRIVE_FILE_ID", "fake-id")
+    monkeypatch.setattr(drive_state.google_drive, "build_client", lambda sa: "client")
+    monkeypatch.setattr(drive_state.google_drive, "download_text", lambda client, fid: "{}")
+    assert drive_state.read_last_run() is None
+
+
+def test_read_last_run_parses_saved_timestamp(monkeypatch):
+    monkeypatch.setattr(drive_state, "SERVICE_ACCOUNT_JSON", "fake")
+    monkeypatch.setattr(drive_state, "STATE_DRIVE_FILE_ID", "fake-id")
+    monkeypatch.setattr(drive_state.google_drive, "build_client", lambda sa: "client")
+    monkeypatch.setattr(
+        drive_state.google_drive,
+        "download_text",
+        lambda client, fid: '{"last_run": "2026-09-04T19:30:00"}',
+    )
+    assert drive_state.read_last_run() == datetime(2026, 9, 4, 19, 30, 0)
+
+
+def test_save_last_run_uploads_json(monkeypatch):
+    monkeypatch.setattr(drive_state, "SERVICE_ACCOUNT_JSON", "fake")
+    monkeypatch.setattr(drive_state, "STATE_DRIVE_FILE_ID", "fake-id")
+    monkeypatch.setattr(drive_state.google_drive, "build_client", lambda sa: "client")
+    uploaded = {}
+
+    def fake_upload(client, file_id, text):
+        uploaded["file_id"] = file_id
+        uploaded["text"] = text
+
+    monkeypatch.setattr(drive_state.google_drive, "upload_text", fake_upload)
+
+    drive_state.save_last_run(datetime(2026, 9, 5, 18, 0, 0))
+
+    assert uploaded["file_id"] == "fake-id"
+    assert json.loads(uploaded["text"]) == {"last_run": "2026-09-05T18:00:00"}
+
+
+def test_save_last_run_noop_when_not_configured(monkeypatch):
+    monkeypatch.setattr(drive_state, "SERVICE_ACCOUNT_JSON", None)
+    monkeypatch.setattr(drive_state, "STATE_DRIVE_FILE_ID", None)
+    drive_state.save_last_run(datetime.now())  # must not raise
+
+
+def test_compute_cutoff_uses_last_run_when_present(monkeypatch):
+    saved = datetime(2026, 9, 4, 19, 30)
+    monkeypatch.setattr(drive_state, "read_last_run", lambda: saved)
+    assert drive_state.compute_cutoff() == saved
+
+
+def test_compute_cutoff_falls_back_to_month_anchor_when_absent(monkeypatch):
+    monkeypatch.setattr(drive_state, "read_last_run", lambda: None)
+    assert drive_state.compute_cutoff() == drive_state.month_anchor()
+
+
+def test_compute_cutoff_falls_back_to_month_anchor_on_read_error(monkeypatch):
+    def boom():
+        raise RuntimeError("drive down")
+
+    monkeypatch.setattr(drive_state, "read_last_run", boom)
+    assert drive_state.compute_cutoff() == drive_state.month_anchor()
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_drive_state.py -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'drive_state'`
+
+- [ ] **Step 3: Implement `drive_state.py`**
+
+```python
+"""
+Persists a "last run" cursor for the orchestrated daily-brief pipeline
+(daily_brief.py) on Google Drive, so runs only need to look back as far
+as the last successful run instead of re-fetching a fixed window every
+time.
+
+Falls back to a month-anchor floor (2 days before the start of the
+current calendar month) when no cursor has been saved yet, so a
+start-of-month monthly planner PDF is never missed on a fresh setup or
+after a gap.
+
+Uses the same Google Drive service account as fetch_whatsapp.py (see
+google_drive.py), but the state file needs to be shared with it as
+Editor (not just Viewer), since this module writes to it.
+
+SETUP:
+    - Create an empty Drive file (e.g. containing `{}`) for the cursor.
+    - Share it with the service account's email as Editor.
+    - Set STATE_DRIVE_FILE_ID to that file's Drive file ID in .env.
+"""
+
+import json
+import os
+from datetime import datetime, timedelta
+
+from dateutil import parser as dateparser
+from dotenv import load_dotenv
+
+import google_drive
+
+load_dotenv()
+
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+STATE_DRIVE_FILE_ID = os.getenv("STATE_DRIVE_FILE_ID")
+
+
+def month_anchor(today: datetime | None = None) -> datetime:
+    """2 days before the start of the current calendar month."""
+    if today is None:
+        today = datetime.now()
+    month_start = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start - timedelta(days=2)
+
+
+def read_last_run() -> datetime | None:
+    if not SERVICE_ACCOUNT_JSON or not STATE_DRIVE_FILE_ID:
+        return None
+    drive_service = google_drive.build_client(SERVICE_ACCOUNT_JSON)
+    text = google_drive.download_text(drive_service, STATE_DRIVE_FILE_ID)
+    data = json.loads(text) if text.strip() else {}
+    raw = data.get("last_run")
+    if not raw:
+        return None
+    return dateparser.parse(raw)
+
+
+def save_last_run(dt: datetime) -> None:
+    if not SERVICE_ACCOUNT_JSON or not STATE_DRIVE_FILE_ID:
+        return
+    try:
+        drive_service = google_drive.build_client(SERVICE_ACCOUNT_JSON)
+        google_drive.upload_text(
+            drive_service, STATE_DRIVE_FILE_ID, json.dumps({"last_run": dt.isoformat()})
+        )
+    except Exception as e:
+        print(f"Warning: failed to save last_run cursor: {e}")
+
+
+def compute_cutoff() -> datetime:
+    try:
+        last_run = read_last_run()
+    except Exception as e:
+        print(f"Warning: failed to read last_run cursor, falling back to month anchor: {e}")
+        last_run = None
+    if last_run is not None:
+        return last_run
+    return month_anchor()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_drive_state.py -v`
+Expected: PASS (10 tests)
+
+---
+
+### Task 13: Optional absolute `cutoff` parameter in `scrape_udt.py`
+
+**Files:**
+- Modify: `scrape_udt.py`
+- Test: `tests/test_scrape_udt.py`
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `tests/test_scrape_udt.py` (uses the existing `_msg` helper's
+sibling pattern, but builds messages directly since it needs to anchor
+to an explicit cutoff rather than an offset from `datetime.now()`):
+
+```python
+def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():
+    from scrape_udt import filter_recent
+
+    cutoff = datetime(2026, 9, 4, 12, 0, 0)
+    messages = [
+        {"id": "in", "title": "t", "posted_at": (cutoff + timedelta(hours=1)).isoformat(), "body": "b", "attachments": []},
+        {"id": "out", "title": "t", "posted_at": (cutoff - timedelta(hours=1)).isoformat(), "body": "b", "attachments": []},
+    ]
+    # lookback_hours=1000 would normally include both if it were used -
+    # confirming cutoff, not lookback_hours, governs the result.
+    result = filter_recent(messages, lookback_hours=1000, cutoff=cutoff)
+    assert [m["id"] for m in result] == ["in"]
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `.venv/bin/python -m pytest tests/test_scrape_udt.py -v`
+Expected: FAIL — `TypeError: filter_recent() got an unexpected keyword argument 'cutoff'`
+
+- [ ] **Step 3: Add the `cutoff` parameter**
+
+In `scrape_udt.py`, replace the `filter_recent` and `fetch_recent_messages`
+functions with:
+
+```python
+def filter_recent(
+    messages: list[dict], lookback_hours: float | None = None, cutoff: datetime | None = None
+) -> list[dict]:
+    if cutoff is None:
+        if lookback_hours is None:
+            lookback_hours = LOOKBACK_HOURS
+        cutoff = datetime.now() - timedelta(hours=lookback_hours)
+    filtered = [
+        m for m in messages
+        if dateparser.parse(m["posted_at"]) >= cutoff
+    ]
+    filtered.sort(key=lambda m: m["posted_at"], reverse=True)
+    return filtered
+
+
+def fetch_recent_messages(
+    lookback_hours: float | None = None,
+    cutoff: datetime | None = None,
+    download_attachments: bool = False,
+) -> list[dict]:
+    """Log in, fetch the activity page, and return messages posted since
+    `cutoff` if given, else within the rolling lookback window (hours),
+    most recent first. Raises RuntimeError if login fails."""
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    login(session)
+    all_messages = fetch_activity_messages(session)
+    if not all_messages:
+        print("No messages parsed - the page structure may differ from what "
+              "was inspected, or login didn't actually succeed. Inspect "
+              "activity_resp.text manually if this happens.")
+    filtered = filter_recent(all_messages, lookback_hours=lookback_hours, cutoff=cutoff)
+    if download_attachments:
+        download_message_attachments(session, filtered)
+    return filtered
+```
+
+(The only behavioral change from the current version: `fetch_recent_messages`
+no longer resolves `lookback_hours` itself — that resolution now happens
+once, inside `filter_recent`, and `fetch_recent_messages` just passes both
+parameters straight through.)
+
+- [ ] **Step 4: Run the full suite to verify everything passes**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all `test_scrape_udt.py` tests, including the new one —
+no regressions, since `filter_recent(messages, lookback_hours=36)`, the
+form all existing tests use, still resolves exactly as before).
+
+---
+
+### Task 14: Wire the cursor into `daily_brief.py`, plus `.env.example`/README updates
+
+**Files:**
+- Modify: `daily_brief.py`
+- Modify: `tests/test_daily_brief.py`
+- Modify: `.env.example`
+- Modify: `README.md`
+
+- [ ] **Step 1: Update `tests/test_daily_brief.py`**
+
+Replace the full contents with:
+
+```python
+import json
+from datetime import datetime
+
+import daily_brief
+
+
+def test_gather_captures_portal_error(monkeypatch):
+    def failing_fetch(**kwargs):
+        raise RuntimeError("login failed")
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["error"] == "RuntimeError: login failed"
+    assert result["portal"]["messages"] == []
+    assert result["whatsapp"]["error"] is None
+    assert result["whatsapp"]["messages"] == []
+
+
+def test_gather_returns_messages_on_success(monkeypatch):
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"title": "x"}])
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [{"text": "y"}])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["messages"] == [{"title": "x"}]
+    assert result["portal"]["error"] is None
+    assert result["whatsapp"]["messages"] == [{"text": "y"}]
+    assert result["whatsapp"]["error"] is None
+
+
+def test_gather_captures_whatsapp_error(monkeypatch):
+    def failing_fetch(**kwargs):
+        raise RuntimeError("drive unreachable")
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: None)
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", failing_fetch)
+
+    result = daily_brief.gather()
+
+    assert result["whatsapp"]["error"] == "RuntimeError: drive unreachable"
+    assert result["portal"]["error"] is None
+
+
+def test_gather_saves_cursor_only_when_both_sources_succeed(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("called_with", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [])
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    daily_brief.gather()
+
+    assert "called_with" in saved
+
+
+def test_gather_does_not_save_cursor_when_a_source_fails(monkeypatch):
+    saved = {}
+
+    def failing_fetch(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(daily_brief, "compute_cutoff", lambda: datetime(2026, 9, 4))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("called_with", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", failing_fetch)
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    daily_brief.gather()
+
+    assert "called_with" not in saved
+
+
+def test_run_writes_output_file(monkeypatch, tmp_path):
+    fixed_result = {
+        "portal": {"messages": [], "error": None},
+        "whatsapp": {"messages": [], "error": None},
+    }
+    monkeypatch.setattr(daily_brief, "gather", lambda: fixed_result)
+    out_path = tmp_path / "out.json"
+    monkeypatch.setattr(daily_brief, "OUTPUT_PATH", out_path)
+
+    result = daily_brief.run()
+
+    assert out_path.exists()
+    assert json.loads(out_path.read_text()) == result == fixed_result
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_daily_brief.py -v`
+Expected: FAIL — `AttributeError` (or similar) since `daily_brief` doesn't
+yet have `compute_cutoff`/`save_last_run` attributes to monkeypatch.
+
+- [ ] **Step 3: Update `daily_brief.py`**
+
+Replace the full contents with:
+
+```python
+"""
+Gathers filtered messages from the school portal and the WhatsApp log,
+and writes a single JSON envelope for the daily-school-brief skill to
+read and turn into a categorized brief.
+
+Each source is best-effort: if one fails, its `error` field is set and
+`messages` is empty, so the skill can still produce a partial brief
+rather than nothing.
+
+Uses a Google-Drive-persisted cursor (see drive_state.py) so each run
+only looks back as far as the last successful run, falling back to a
+month-anchor floor (2 days before the start of the current month) when
+no cursor is available yet - this guarantees a start-of-month monthly
+planner PDF is never missed on a fresh setup or after a gap. The cursor
+is only advanced when BOTH sources succeed, so a failure causes the next
+run to retry the same window rather than silently losing data.
+
+USAGE:
+    python daily_brief.py
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+
+from scrape_udt import fetch_recent_messages
+from fetch_whatsapp import fetch_recent_whatsapp_messages
+from drive_state import compute_cutoff, save_last_run
+
+OUTPUT_PATH = Path(__file__).parent / "output" / "daily_brief_input.json"
+
+
+def gather() -> dict:
+    run_started_at = datetime.now()
+    cutoff = compute_cutoff()
+    result = {
+        "portal": {"messages": [], "error": None},
+        "whatsapp": {"messages": [], "error": None},
+    }
+
+    try:
+        result["portal"]["messages"] = fetch_recent_messages(cutoff=cutoff, download_attachments=False)
+    except Exception as e:
+        result["portal"]["error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(cutoff=cutoff)
+    except Exception as e:
+        result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
+
+    if result["portal"]["error"] is None and result["whatsapp"]["error"] is None:
+        save_last_run(run_started_at)
+
+    return result
+
+
+def run():
+    data = gather()
+    OUTPUT_PATH.parent.mkdir(exist_ok=True)
+    OUTPUT_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    print(f"Wrote {OUTPUT_PATH}")
+    return data
+
+
+if __name__ == "__main__":
+    run()
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_daily_brief.py -v`
+Expected: PASS (6 tests)
+
+- [ ] **Step 5: Run the entire suite**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests across every test file — this is the full
+regression check after touching 4 production files across these 4 tasks).
+
+- [ ] **Step 6: Update `.env.example`**
+
+Add a new line documenting `STATE_DRIVE_FILE_ID`, placed right after the
+existing `WHATSAPP_DRIVE_FILE_ID` line:
+
+```
+# The Drive file ID of the cross-run cursor state file (a small JSON
+# file containing {"last_run": "<isoformat>"}). Must be shared with the
+# service account as Editor (not just Viewer) since it's written to.
+STATE_DRIVE_FILE_ID=your_state_file_id_here
+```
+
+- [ ] **Step 7: Update `README.md`**
+
+In the "Components" section, add a bullet after the `daily_brief.py`
+bullet describing the cursor behavior, e.g.:
+
+```
+- **`drive_state.py`** — persists a small `last_run` cursor on Google
+  Drive between orchestrated runs, so `daily_brief.py` only looks back as
+  far as the last successful run instead of a fixed window. Falls back
+  to 2 days before the start of the current calendar month when no
+  cursor exists yet (fresh setup, or after a gap), so a start-of-month
+  monthly planner PDF is never missed.
+```
+
+Also add `STATE_DRIVE_FILE_ID` to the "Setup" section's list of `.env`
+values to fill in, alongside the existing `GOOGLE_SERVICE_ACCOUNT_JSON`
+and `WHATSAPP_DRIVE_FILE_ID` mention.
+
+- [ ] **Step 8: Commit**
+
+Commit all changes from Tasks 11-14 (or commit incrementally per task,
+whichever this session already did) with descriptive messages, normal
+`git add`/`git commit`/`git push`, no force-push, no amend.

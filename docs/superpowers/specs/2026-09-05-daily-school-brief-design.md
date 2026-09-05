@@ -61,10 +61,11 @@ does not depend on any personal machine being powered on.
 ### 1. Portal fetcher (adapts `scrape_udt.py`)
 
 - Reuses the existing login + parsing logic (proven working).
-- Change: replace the fixed `.env` `CUTOFF_DATE` with a rolling window
-  computed at run time (`now - 36h`), so each run is self-contained and
-  needs no persisted cursor between runs. 36h (rather than 24h) gives
-  slack for the schedule slipping or a late-posted message.
+- When run standalone (`python scrape_udt.py`), keeps the original rolling
+  window (`now - LOOKBACK_HOURS`, default 36h). When run as part of the
+  orchestrated pipeline (`daily_brief.py`), instead uses an explicit
+  absolute cutoff computed by the shared cursor logic below (see
+  "Cross-run cursor").
 - Credentials (`UDT_USERNAME`, `UDT_PASSWORD`) move from local `.env` to
   the scheduled cloud agent's secrets config — not committed to this repo.
 - Attachments (PDFs): the brief mentions attachment names as text (e.g.
@@ -73,14 +74,49 @@ does not depend on any personal machine being powered on.
 
 ### 2. WhatsApp fetcher (new script)
 
-- Reads the JSONL file from a Google Drive folder via the Drive API
-  (read-only), using a service account.
+- Reads the JSONL file from a Google Drive folder via the Drive API,
+  using a service account.
 - You share the Drive folder with the service account's email as Viewer —
   no interactive OAuth consent flow needed.
-- Filters to the same rolling 36h window using each line's `timestamp`.
+- Filters to the rolling window (standalone) or the shared cursor cutoff
+  (orchestrated), same as the portal fetcher.
 - Does not modify or prune the Drive file — it grows indefinitely as an
   append-only log; the fetcher only ever reads and filters, so there's no
   risk of losing data through a race with the phone still appending.
+
+### 2a. Cross-run cursor (revises the original "no persisted cursor" decision)
+
+The original design deliberately avoided persisting a cursor between runs,
+to keep each run self-contained. In practice this meant re-fetching and
+re-processing the same ~36h window on every run, and — more importantly —
+missed content posted further back than 36h (e.g. a monthly planner PDF
+posted once at the start of the month, which a 36h window would only ever
+catch on the one day it was posted).
+
+Revised design: a small JSON state file (`{"last_run": "<isoformat>"}`) is
+persisted **on Google Drive** (not committed to git — chosen over git so
+that a cloud-routine run and a local run share the same cursor without
+needing to push a commit just to update it), using the same service
+account as the WhatsApp fetcher, now with **Editor** access (not just
+Viewer) to that one state file.
+
+Each orchestrated run (`daily_brief.py`):
+1. Reads the cursor. If present, that's the cutoff.
+2. If absent (first-ever run, or the state file is lost/reset), falls
+   back to a **month-anchor floor**: 2 days before the start of the
+   current calendar month. This guarantees a start-of-month planner PDF
+   is never missed on a fresh setup or after a gap, at the cost of
+   reprocessing a larger backlog just that one time.
+3. After a run where **both** sources succeeded, advances the cursor to
+   the run's start time (not "now" after fetching, to avoid a gap if a
+   message arrives mid-run). If either source failed, the cursor is
+   **not** advanced, so the next run retries the same window rather than
+   silently losing whatever the failed source missed.
+
+Standalone script usage (`python scrape_udt.py` / `python
+fetch_whatsapp.py` run directly, not via `daily_brief.py`) is unaffected
+and keeps using `LOOKBACK_HOURS` — the cursor mechanism only applies to
+the orchestrated pipeline.
 
 ### 3. Phone-side capture (outside this repo — setup, not code)
 
@@ -148,7 +184,9 @@ sending nothing.
 
 - Single child, single class WhatsApp group, single portal account —
   matches current usage; no multi-child or multi-group support.
-- No historical archive/database of past messages — each run is
-  self-contained over a rolling window; nothing is retained beyond what
-  Google Drive already retains in the WhatsApp log file.
+- No historical archive/database of past messages — only a single
+  small cursor (`last_run` timestamp) is retained on Google Drive between
+  orchestrated runs (see "Cross-run cursor" above); nothing else about
+  past messages is stored beyond what Google Drive already retains in
+  the WhatsApp log file.
 - No in-app UI — delivery is a push notification only (per user choice).
