@@ -64,59 +64,62 @@ does not depend on any personal machine being powered on.
 - When run standalone (`python scrape_udt.py`), keeps the original rolling
   window (`now - LOOKBACK_HOURS`, default 36h). When run as part of the
   orchestrated pipeline (`daily_brief.py`), instead uses an explicit
-  absolute cutoff computed by the shared cursor logic below (see
-  "Cross-run cursor").
+  absolute cutoff computed by `cutoff.py` (see "Month-start cutoff, not a
+  persisted cursor").
 - Credentials (`UDT_USERNAME`, `UDT_PASSWORD`) move from local `.env` to
   the scheduled cloud agent's secrets config — not committed to this repo.
-- Attachments (PDFs): the brief mentions attachment names as text (e.g.
-  "PDF attached: Homework_Sheet.pdf") rather than delivering the file
-  itself through the push notification.
+- Attachments (PDFs): downloaded (in the orchestrated pipeline too, not
+  just standalone), so the brief-generation skill can `Read` them
+  directly (Claude Code's `Read` tool handles PDFs natively) when
+  homework/agenda/dress-code details live inside the document rather than
+  the message body text. A PDF already present on disk under
+  `output/pdfs/` (by filename) is not re-downloaded.
 
 ### 2. WhatsApp fetcher (new script)
 
-- Reads the JSONL file from a Google Drive folder via the Drive API,
-  using a service account.
+- Reads the JSONL file from a Google Drive folder via the Drive API
+  (read-only), using a service account.
 - You share the Drive folder with the service account's email as Viewer —
   no interactive OAuth consent flow needed.
-- Filters to the rolling window (standalone) or the shared cursor cutoff
+- Filters to the rolling window (standalone) or the month-start cutoff
   (orchestrated), same as the portal fetcher.
 - Does not modify or prune the Drive file — it grows indefinitely as an
   append-only log; the fetcher only ever reads and filters, so there's no
   risk of losing data through a race with the phone still appending.
 
-### 2a. Cross-run cursor (revises the original "no persisted cursor" decision)
+### 2a. Month-start cutoff, not a persisted cursor
 
-The original design deliberately avoided persisting a cursor between runs,
-to keep each run self-contained. In practice this meant re-fetching and
-re-processing the same ~36h window on every run, and — more importantly —
-missed content posted further back than 36h (e.g. a monthly planner PDF
-posted once at the start of the month, which a 36h window would only ever
-catch on the one day it was posted).
+Two earlier revisions of this section are superseded here. The original
+design used a fixed ~36h rolling window with no persisted state; a later
+revision added a Google-Drive-persisted "last run" cursor to avoid
+re-fetching the same window every day. Both had the same flaw: content
+posted once (e.g. a monthly planner PDF posted at the start of the
+month, containing information relevant to a specific day later in the
+month) would only ever be seen on the day it was originally posted —
+once a rolling window or an advancing cursor moved past it, that
+day-specific information was gone for good, even though it had been
+fetched (and, for PDFs, downloaded) once already.
 
-Revised design: a small JSON state file (`{"last_run": "<isoformat>"}`) is
-persisted **on Google Drive** (not committed to git — chosen over git so
-that a cloud-routine run and a local run share the same cursor without
-needing to push a commit just to update it), using the same service
-account as the WhatsApp fetcher, now with **Editor** access (not just
-Viewer) to that one state file.
+The fix doesn't need new persisted state at all: `fetch_activity_messages()`
+already returns every message currently visible on the portal's one
+activity page — not just what's "new" — and the WhatsApp Drive log
+already retains its entire history (nothing is ever deleted from it). So
+for the orchestrated pipeline, both fetchers simply use a cutoff of "2
+days before the start of the current calendar month" (`cutoff.py`'s
+`month_anchor()`) **every run**, not an advancing cursor. This means nothing
+this-month is ever dropped from consideration, regardless of when it was
+originally posted.
 
-Each orchestrated run (`daily_brief.py`):
-1. Reads the cursor. If present, that's the cutoff.
-2. If absent (first-ever run, or the state file is lost/reset), falls
-   back to a **month-anchor floor**: 2 days before the start of the
-   current calendar month. This guarantees a start-of-month planner PDF
-   is never missed on a fresh setup or after a gap, at the cost of
-   reprocessing a larger backlog just that one time.
-3. After a run where **both** sources succeeded, advances the cursor to
-   the run's start time (not "now" after fetching, to avoid a gap if a
-   message arrives mid-run). If either source failed, the cursor is
-   **not** advanced, so the next run retries the same window rather than
-   silently losing whatever the failed source missed.
+Re-fetching and re-filtering the whole month is cheap (one login + one
+page parse; one small text-file read) — the only genuinely expensive
+thing to avoid repeating is downloading the same PDF attachment again
+every day, which is solved separately and locally: `scrape_udt.py` skips
+downloading an attachment if a file with its target name already exists
+under `output/pdfs/`.
 
 Standalone script usage (`python scrape_udt.py` / `python
 fetch_whatsapp.py` run directly, not via `daily_brief.py`) is unaffected
-and keeps using `LOOKBACK_HOURS` — the cursor mechanism only applies to
-the orchestrated pipeline.
+and keeps using `LOOKBACK_HOURS`.
 
 ### 3. Phone-side capture (outside this repo — setup, not code)
 
@@ -140,6 +143,10 @@ the orchestrated pipeline.
   agenda (events/holidays/notices), tomorrow's dress code, and other
   reminders. This is prompt-driven extraction (the messages are
   unstructured free text), not brittle keyword/regex matching.
+- For portal messages with a downloaded attachment (a `saved_as` local
+  path present), the skill `Read`s that PDF directly — homework/agenda/
+  dress-code details are often inside the document itself, not the
+  message body text.
 - If a category has nothing relevant that day, it's omitted or marked
   "nothing today" rather than forcing a slot.
 
@@ -184,9 +191,10 @@ sending nothing.
 
 - Single child, single class WhatsApp group, single portal account —
   matches current usage; no multi-child or multi-group support.
-- No historical archive/database of past messages — only a single
-  small cursor (`last_run` timestamp) is retained on Google Drive between
-  orchestrated runs (see "Cross-run cursor" above); nothing else about
-  past messages is stored beyond what Google Drive already retains in
-  the WhatsApp log file.
+- No historical archive/database of past messages, and no persisted
+  cursor between runs at all — the orchestrated pipeline always uses a
+  month-start cutoff (see "Month-start cutoff" above), relying on the
+  portal's own page and the WhatsApp Drive log already retaining their
+  history; nothing extra is stored by this project beyond the downloaded
+  PDFs in `output/pdfs/` (deduped by filename, not otherwise pruned).
 - No in-app UI — delivery is a push notification only (per user choice).
