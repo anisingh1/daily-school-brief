@@ -98,6 +98,19 @@ Then sends the brief as a push notification.
    is more important than a generic class-wide notice and should stand
    out, not get buried among the class-wide items below.
 
+   Conversely, some documents (e.g. an assembly schedule) pair each
+   day's specific content - a "thought of the day," a "word of the
+   day," a specific activity - with the named student assigned to
+   present or lead it that day. When that pairing exists, the content
+   is only relevant if Aviraj is the student named for that day - check
+   the roster/assignment table before including anything from it. If
+   he isn't assigned anything for the day the brief covers, leave that
+   entire item out (don't report a classmate's assigned thought/word/
+   activity as if it were general class information). A genuinely
+   class-wide detail with no per-student assignment attached (e.g. "no
+   school Friday for a holiday," a schedule change affecting everyone)
+   is unaffected by this and should still be included normally.
+
    - **Homework**: any assignment, reading, or task mentioned for the
      child to do.
    - **Tomorrow's agenda**: events, special activities, holidays, timing
