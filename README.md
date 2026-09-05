@@ -14,32 +14,40 @@ for the implementation plan and current build status.
 - **`scrape_udt.py`** — logs into the UDT eSchool parent portal, fetches
   the activity/messages page, parses each message (title, author, date,
   body, PDF attachments), and filters to a rolling lookback window (default
-  36 hours) when run standalone. Downloads PDF attachments, skipping any
-  file that's already been saved under `output/pdfs/` (by name), so the
-  same document isn't re-downloaded every run. Can be run directly
-  (`python scrape_udt.py`), or imported (`fetch_recent_messages()`) for
-  use by other scripts.
+  36 hours) when run standalone. Downloads PDF attachments into
+  `data/pdfs/`, skipping any file that's already been saved there (by
+  message ID + name), so the same document isn't re-downloaded every
+  run. Can be run directly (`python scrape_udt.py`), or imported
+  (`fetch_recent_messages()`) for use by other scripts.
 - **`fetch_whatsapp.py`** — reads WhatsApp group messages forwarded via
   phone automation into a JSONL file on Google Drive (see
   `docs/PHONE_SETUP.md`), via the Google Drive API using a service
   account, filtered to the same rolling lookback window (standalone) or
   the orchestrated pipeline's month-start cutoff.
-- **`cutoff.py`** — computes the cutoff used by the orchestrated pipeline:
-  2 days before the start of the current calendar month, every run (not
-  an advancing cursor). The portal page and the WhatsApp Drive log both
-  already retain their own full history, so re-fetching the whole month
-  is cheap and nothing posted earlier in the month is ever missed, no
-  matter how many days later it turns out to be relevant.
-- **`daily_brief.py`** — orchestrator that calls both fetchers with that
-  shared cutoff, treating each as best-effort (one source failing doesn't
-  block the other), downloads portal attachments, and writes a combined
-  JSON envelope to `output/daily_brief_input.json`.
+- **`cutoff.py`** — `month_anchor()`: 2 days before the start of the
+  current calendar month. Used directly for the WhatsApp fetch (its
+  Drive log already retains its own full history, so re-scanning the
+  current month is enough), and as `portal_archive.py`'s fallback when
+  no portal cursor has been recorded yet.
+- **`portal_archive.py`** — persists the portal message archive
+  (`data/portal_messages.json`, deduplicated by message id) and a
+  "last run" cursor (`data/last_run.json`) in this git repo. The
+  orchestrated pipeline fetches only what's new since the cursor (or
+  since `month_anchor()` on a fresh setup), merges it into the archive,
+  and always considers the FULL archive when generating the brief — so
+  nothing scraped at any point in the past is ever dropped.
+- **`daily_brief.py`** — orchestrator that calls both fetchers (portal
+  via `portal_archive.py`'s cutoff, WhatsApp via `cutoff.month_anchor()`),
+  treating each as best-effort (one source failing doesn't block the
+  other), downloads portal attachments, and writes a combined JSON
+  envelope to `output/daily_brief_input.json`.
 - The `daily-school-brief` Claude Code skill
   (`.claude/skills/daily-school-brief/SKILL.md`) reads that envelope,
   `Read`s any downloaded PDF attachments directly (homework/agenda/
   dress-code details are often inside the document, not just the message
-  text), categorizes everything into homework / tomorrow's agenda /
-  dress code / other reminders, and sends a push notification with the
+  text), commits and pushes `data/` so the archive/cursor persist across
+  future runs, categorizes everything into homework / tomorrow's agenda
+  / dress code / other reminders, and sends a push notification with the
   brief. A scheduled cloud routine runs this automatically each evening.
 
 ## Setup
@@ -75,24 +83,31 @@ for the implementation plan and current build status.
   ```
   python fetch_whatsapp.py
   ```
-- Full pipeline (writes the combined brief-input JSON, downloads portal
-  attachments, uses the month-start cutoff):
+- Full pipeline (writes the combined brief-input JSON, merges the portal
+  archive, downloads portal attachments):
   ```
   python daily_brief.py
   ```
+  After running this as part of the scheduled/automated flow, `data/`
+  needs to be committed and pushed for the archive/cursor to persist —
+  see the `daily-school-brief` skill, which does this automatically.
 
 ## Output
 
 - `output/messages_<timestamp>.json` — all parsed portal messages within
   the lookback window, with title, author/date, body text, and attachment
-  info (written by `scrape_udt.py`'s standalone `run()`).
-- `output/pdfs/` — downloaded PDF (or other) attachments, named using the
-  message ID and their display name in the portal. Populated by both
-  standalone runs and the orchestrated pipeline; a file already present
-  here is not re-downloaded.
+  info (written by `scrape_udt.py`'s standalone `run()`). Not committed
+  (gitignored, under `output/`).
 - `output/daily_brief_input.json` — combined `{"portal": {...}, "whatsapp":
   {...}}` envelope written by `daily_brief.py`, each side having
-  `messages` and `error` fields.
+  `messages` and `error` fields. Not committed.
+- `data/portal_messages.json` — the permanent portal message archive,
+  deduplicated by message id. Committed to this repo.
+- `data/last_run.json` — the portal cursor (`{"last_run": "<isoformat>"}`).
+  Committed to this repo.
+- `data/pdfs/` — downloaded PDF (or other) attachments, named using the
+  message ID and their display name in the portal. Committed to this
+  repo; a file already present here is not re-downloaded.
 
 ## Notes
 
@@ -110,3 +125,7 @@ for the implementation plan and current build status.
 - WhatsApp messages are captured entirely through Android's normal
   notification system (via phone automation), not through any unofficial
   WhatsApp client library — see the design spec for why.
+- `data/` grows without pruning over time (portal messages, cursor, and
+  PDFs are never deleted) — acceptable for a personal single-class
+  project, but worth knowing if this is reused somewhere with much higher
+  message/attachment volume.
