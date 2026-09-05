@@ -19,7 +19,7 @@ USAGE:
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -40,8 +40,7 @@ ACTIVITY_URL = f"{BASE_URL}/parents/activity?type=3"
 USERNAME = os.getenv("UDT_USERNAME")
 PASSWORD = os.getenv("UDT_PASSWORD")
 
-_cutoff_str = os.getenv("CUTOFF_DATE", "2026-08-01")
-CUTOFF_DATE = dateparser.parse(_cutoff_str)
+LOOKBACK_HOURS = float(os.getenv("LOOKBACK_HOURS", "36"))
 
 if not USERNAME or not PASSWORD:
     raise SystemExit(
@@ -120,46 +119,42 @@ def extract_messages(html: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Fetching
 # ---------------------------------------------------------------------------
 
-def run():
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    # --- Login ---
+def login(session) -> None:
     resp = session.post(
         LOGIN_URL,
         data={"username": USERNAME, "password": PASSWORD},
         allow_redirects=True,
     )
     resp.raise_for_status()
-
     if 'id="login-form"' in resp.text:
-        print("Login appears to have failed - check UDT_USERNAME/UDT_PASSWORD in .env, "
-              "or the site may need additional hidden form fields not seen "
-              "in the static HTML (check the Network tab's Form Data on submit).")
-        return
+        raise RuntimeError(
+            "Login appears to have failed - check UDT_USERNAME/UDT_PASSWORD in .env, "
+            "or the site may need additional hidden form fields not seen "
+            "in the static HTML (check the Network tab's Form Data on submit)."
+        )
 
-    # --- Fetch activity page (all messages load on this one page) ---
+
+def fetch_activity_messages(session) -> list[dict]:
     activity_resp = session.get(ACTIVITY_URL)
     activity_resp.raise_for_status()
-    all_messages = extract_messages(activity_resp.text)
+    return extract_messages(activity_resp.text)
 
-    if not all_messages:
-        print("No messages parsed - the page structure may differ from what "
-              "was inspected, or login didn't actually succeed. Inspect "
-              "activity_resp.text manually if this happens.")
-        return
 
+def filter_recent(messages: list[dict], lookback_hours: float) -> list[dict]:
+    cutoff = datetime.now() - timedelta(hours=lookback_hours)
     filtered = [
-        m for m in all_messages
-        if dateparser.parse(m["posted_at"]) >= CUTOFF_DATE
+        m for m in messages
+        if dateparser.parse(m["posted_at"]) >= cutoff
     ]
     filtered.sort(key=lambda m: m["posted_at"], reverse=True)
+    return filtered
 
-    # --- Download attachments ---
-    for m in filtered:
+
+def download_message_attachments(session, messages: list[dict]) -> None:
+    for m in messages:
         for att in m["attachments"]:
             href = att["href"]
             if not href:
@@ -189,7 +184,29 @@ def run():
                 att["saved_as"] = None
                 att["note"] = f"Download failed: {e}"
 
-    # --- Save ---
+
+def fetch_recent_messages(lookback_hours: float | None = None, download_attachments: bool = False) -> list[dict]:
+    """Log in, fetch the activity page, and return messages posted within
+    the rolling lookback window (hours), most recent first. Raises
+    RuntimeError if login fails."""
+    if lookback_hours is None:
+        lookback_hours = LOOKBACK_HOURS
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    login(session)
+    all_messages = fetch_activity_messages(session)
+    filtered = filter_recent(all_messages, lookback_hours)
+    if download_attachments:
+        download_message_attachments(session, filtered)
+    return filtered
+
+
+def run():
+    filtered = fetch_recent_messages(download_attachments=True)
+    if not filtered:
+        print("No messages parsed in the lookback window.")
+        return
+
     out_file = OUTPUT_DIR / f"messages_{datetime.now():%Y%m%d_%H%M%S}.json"
     out_file.write_text(json.dumps(filtered, indent=2, ensure_ascii=False))
     print(f"Saved {len(filtered)} messages to {out_file}")
