@@ -59,9 +59,13 @@ Then sends the brief as a push notification.
    This is necessary because a scheduled cloud routine clones this repo
    fresh on every run - anything written to `data/` during this run is
    lost unless it's committed and pushed back before the run ends. If
-   this step fails (e.g. no push access), note it as a warning in the
-   brief, but continue - a failure here doesn't affect today's brief,
-   only whether tomorrow's run starts from today's updated archive.
+   this step fails for any reason - no push access, or a rejected
+   non-fast-forward push because another run or a human pushed in
+   between - just note it as a warning in the brief and continue. Do
+   NOT force-push, rebase, or otherwise try to resolve a rejected push;
+   a failure here doesn't affect today's brief, only whether tomorrow's
+   run starts from today's updated archive, and it's safe to just let
+   the next run retry from wherever the remote actually is.
 
 3. Read `output/daily_brief_input.json` (path relative to the project
    root from step 1 - this only works if you're actually in that
