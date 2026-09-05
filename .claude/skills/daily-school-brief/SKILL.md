@@ -127,8 +127,14 @@ Then sends the brief as a push notification.
      back to the fixed weekly swim/skate reminder when nothing in the
      scraped messages says otherwise for that specific day.
    - **Other reminders**: anything else worth a parent's attention (fee
-     due dates, forms to sign, items to bring) that doesn't fit the
-     above.
+     due dates, forms to sign, items to bring, competitions, events)
+     that doesn't fit the above, **but only if its date falls within
+     the next 5 days from today (IST), inclusive of tomorrow**. If a
+     message mentions something further out than that (e.g. a
+     competition three weeks away), don't surface it yet - it'll
+     naturally get picked up on a later day's run once it's within the
+     5-day window. This keeps the brief focused on what's actually
+     actionable soon, not a running list of everything ever mentioned.
    Omit a section entirely if there's nothing for it, rather than
    forcing an empty slot.
 
