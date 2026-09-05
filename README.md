@@ -125,10 +125,11 @@ for the implementation plan and current build status.
 - WhatsApp messages are captured entirely through Android's normal
   notification system (via phone automation), not through any unofficial
   WhatsApp client library — see the design spec for why.
-- `data/` grows without pruning over time (portal messages and cursor
-  are never deleted) — acceptable for a personal single-class project,
-  but worth knowing if this is reused somewhere with much higher message
-  volume. `data/pdfs/` specifically is a bigger long-term concern than
-  the JSON files: git keeps every historical blob forever, so simply
-  deleting an old PDF later doesn't reclaim repo size — that requires a
-  history rewrite (`git gc`, BFG, `git filter-repo`), not a plain delete.
+- Portal messages and their attachment PDFs older than 2 calendar months
+  are pruned from `data/portal_messages.json` and deleted from
+  `data/pdfs/` each run (see `portal_archive.py`'s `RETENTION_MONTHS`).
+  Deleting a file doesn't reclaim git history size on its own though —
+  the blob still exists in past commits until a history rewrite
+  (`git gc`, BFG, `git filter-repo`), so repo size still grows slowly
+  over time even with pruning in place, just far more slowly than
+  without it.

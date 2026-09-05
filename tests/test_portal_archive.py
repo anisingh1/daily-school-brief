@@ -1,5 +1,7 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from dateutil.relativedelta import relativedelta
 
 import portal_archive
 
@@ -88,3 +90,67 @@ def test_save_archive_writes_json(tmp_path, monkeypatch):
     portal_archive.save_archive(messages)
 
     assert json.loads((tmp_path / "portal_messages.json").read_text()) == messages
+
+
+def test_is_within_retention_keeps_recent_message():
+    now = datetime(2026, 9, 5)
+    recent = (now - timedelta(days=10)).isoformat()
+    assert portal_archive.is_within_retention(recent, now) is True
+
+
+def test_is_within_retention_drops_message_older_than_two_months():
+    now = datetime(2026, 9, 5)
+    old = (now - relativedelta(months=3)).isoformat()
+    assert portal_archive.is_within_retention(old, now) is False
+
+
+def test_prune_archive_keeps_recent_and_drops_old():
+    now = datetime(2026, 9, 5)
+    recent = {
+        "id": "1", "title": "t",
+        "posted_at": (now - timedelta(days=5)).isoformat(),
+        "body": "b", "attachments": [],
+    }
+    old = {
+        "id": "2", "title": "t",
+        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "body": "b", "attachments": [],
+    }
+
+    result = portal_archive.prune_archive([recent, old], now)
+
+    assert result == [recent]
+
+
+def test_prune_archive_deletes_orphaned_pdf(tmp_path):
+    now = datetime(2026, 9, 5)
+    pdf_path = tmp_path / "2_Homework.pdf"
+    pdf_path.write_bytes(b"pdf content")
+
+    old = {
+        "id": "2", "title": "t",
+        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "body": "b",
+        "attachments": [{"name": "Homework", "href": "x", "saved_as": str(pdf_path)}],
+    }
+
+    portal_archive.prune_archive([old], now)
+
+    assert not pdf_path.exists()
+
+
+def test_prune_archive_keeps_pdf_for_recent_message(tmp_path):
+    now = datetime(2026, 9, 5)
+    pdf_path = tmp_path / "1_Homework.pdf"
+    pdf_path.write_bytes(b"pdf content")
+
+    recent = {
+        "id": "1", "title": "t",
+        "posted_at": (now - timedelta(days=5)).isoformat(),
+        "body": "b",
+        "attachments": [{"name": "Homework", "href": "x", "saved_as": str(pdf_path)}],
+    }
+
+    portal_archive.prune_archive([recent], now)
+
+    assert pdf_path.exists()

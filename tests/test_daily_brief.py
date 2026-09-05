@@ -27,6 +27,7 @@ def test_gather_merges_and_saves_archive_on_portal_success(monkeypatch):
         "merge_into_archive",
         lambda new: [{"id": "new", "title": "x"}, {"id": "old", "title": "y"}],
     )
+    monkeypatch.setattr(daily_brief, "prune_archive", lambda archive: archive)
     monkeypatch.setattr(daily_brief, "save_archive", lambda archive: saved.setdefault("archive", archive))
     monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
     monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
@@ -65,6 +66,7 @@ def test_gather_does_not_advance_cursor_if_archive_save_fails(monkeypatch):
     monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
     monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"id": "new", "title": "x"}])
     monkeypatch.setattr(daily_brief, "merge_into_archive", lambda new: [{"id": "new", "title": "x"}])
+    monkeypatch.setattr(daily_brief, "prune_archive", lambda archive: archive)
     monkeypatch.setattr(daily_brief, "save_archive", failing_save_archive)
     monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
     monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
@@ -131,6 +133,30 @@ def test_gather_uses_portal_cutoff_and_downloads_attachments(monkeypatch):
 
     assert calls["cutoff"] == "fixed-cutoff"
     assert calls["download_attachments"] is True
+
+
+def test_gather_prunes_archive_before_saving(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"id": "new", "title": "x"}])
+    monkeypatch.setattr(
+        daily_brief,
+        "merge_into_archive",
+        lambda new: [{"id": "new", "title": "x"}, {"id": "old", "title": "y"}],
+    )
+    monkeypatch.setattr(
+        daily_brief,
+        "prune_archive",
+        lambda archive: [m for m in archive if m["id"] != "old"],
+    )
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: saved.setdefault("archive", archive))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["messages"] == [{"id": "new", "title": "x"}]
+    assert saved["archive"] == [{"id": "new", "title": "x"}]
 
 
 def test_run_writes_output_file(monkeypatch, tmp_path):

@@ -33,7 +33,7 @@ from typing import Any, TypedDict
 
 from cutoff import month_anchor
 from fetch_whatsapp import fetch_recent_whatsapp_messages
-from portal_archive import compute_portal_cutoff, merge_into_archive, save_archive, save_last_run
+from portal_archive import compute_portal_cutoff, merge_into_archive, prune_archive, save_archive, save_last_run
 from scrape_udt import fetch_recent_messages
 
 OUTPUT_PATH = Path(__file__).parent / "output" / "daily_brief_input.json"
@@ -45,7 +45,7 @@ class SourceResult(TypedDict):
 
 
 def gather() -> dict[str, SourceResult]:
-    run_started_at = datetime.now()
+    run_started_at = datetime.now()  # noqa: DTZ005 - naive on purpose: fetch_recent_messages compares it against naive portal timestamps; fetch_recent_whatsapp_messages attaches tz itself when needed
     result: dict[str, SourceResult] = {
         "portal": {"messages": [], "error": None},
         "whatsapp": {"messages": [], "error": None},
@@ -55,9 +55,10 @@ def gather() -> dict[str, SourceResult]:
         portal_cutoff = compute_portal_cutoff()
         new_messages = fetch_recent_messages(cutoff=portal_cutoff, download_attachments=True)
         full_archive = merge_into_archive(new_messages)
-        save_archive(full_archive)
+        pruned_archive = prune_archive(full_archive)
+        save_archive(pruned_archive)
         save_last_run(run_started_at)
-        result["portal"]["messages"] = full_archive
+        result["portal"]["messages"] = pruned_archive
     except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
         result["portal"]["error"] = f"{type(e).__name__}: {e}"
 

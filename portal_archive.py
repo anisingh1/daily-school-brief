@@ -18,7 +18,10 @@ Cutoff logic: if no cursor has been saved yet (fresh setup, or the
 data/ directory was reset), fall back to cutoff.month_anchor() so a
 start-of-month document is still caught on the first run. Otherwise,
 use the last run's timestamp - only fetch what's new, merge it into the
-archive, and advance the cursor.
+archive, and advance the cursor. Messages (and their attachment files)
+older than `RETENTION_MONTHS` (2) are pruned from the archive and
+deleted from disk each run - committing PDFs to git grows the repo's
+binary history forever, so this keeps that growth bounded.
 """
 
 import json
@@ -26,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from dateutil import parser as dateparser
+from dateutil.relativedelta import relativedelta
 
 from cutoff import month_anchor
 
@@ -81,3 +85,33 @@ def merge_into_archive(new_messages: list[dict]) -> list[dict]:
 def save_archive(messages: list[dict]) -> None:
     DATA_DIR.mkdir(exist_ok=True)
     ARCHIVE_PATH.write_text(json.dumps(messages, indent=2, ensure_ascii=False))
+
+
+RETENTION_MONTHS = 2
+
+
+def is_within_retention(posted_at: str, now: datetime | None = None) -> bool:
+    if now is None:
+        now = datetime.now()
+    retention_cutoff = now - relativedelta(months=RETENTION_MONTHS)
+    return dateparser.parse(posted_at) >= retention_cutoff
+
+
+def delete_attachments(messages: list[dict]) -> None:
+    for m in messages:
+        for att in m.get("attachments", []):
+            saved_as = att.get("saved_as")
+            if saved_as and Path(saved_as).exists():
+                Path(saved_as).unlink()
+
+
+def prune_archive(messages: list[dict], now: datetime | None = None) -> list[dict]:
+    kept = []
+    dropped = []
+    for m in messages:
+        if is_within_retention(m["posted_at"], now):
+            kept.append(m)
+        else:
+            dropped.append(m)
+    delete_attachments(dropped)
+    return kept
