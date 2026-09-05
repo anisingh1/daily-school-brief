@@ -1,0 +1,200 @@
+"""
+UDT eSchool parent portal scraper.
+
+Logs into the school's UDT eSchool parent portal via a plain form POST,
+fetches the activity/messages page (all messages load on one page - no
+pagination or scroll-triggered fetching needed), parses each message,
+filters by date, and downloads any PDF attachments by following each
+attachment's viewer page to find the real file URL.
+
+SETUP:
+    pip install -r requirements.txt
+    cp .env.example .env
+    # then edit .env and fill in your real values
+
+USAGE:
+    python scrape_udt.py
+"""
+
+import json
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
+from dateutil import parser as dateparser
+from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# CONFIG - loaded from .env (see .env.example)
+# ---------------------------------------------------------------------------
+
+load_dotenv()
+
+BASE_URL = os.getenv("UDT_BASE_URL", "https://sarvottam.udtweb.com")
+LOGIN_URL = f"{BASE_URL}/Logins/index"
+ACTIVITY_URL = f"{BASE_URL}/parents/activity?type=3"
+
+USERNAME = os.getenv("UDT_USERNAME")
+PASSWORD = os.getenv("UDT_PASSWORD")
+
+_cutoff_str = os.getenv("CUTOFF_DATE", "2026-08-01")
+CUTOFF_DATE = dateparser.parse(_cutoff_str)
+
+if not USERNAME or not PASSWORD:
+    raise SystemExit(
+        "UDT_USERNAME and/or UDT_PASSWORD are not set. "
+        "Copy .env.example to .env and fill in your real credentials."
+    )
+
+OUTPUT_DIR = Path(__file__).parent / "output"
+OUTPUT_DIR.mkdir(exist_ok=True)
+PDF_DIR = OUTPUT_DIR / "pdfs"
+PDF_DIR.mkdir(exist_ok=True)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+}
+
+DATE_RE = re.compile(
+    r"posted .*? on (\d{1,2} \w{3} \d{4} \d{1,2}:\d{2} [ap]m)", re.IGNORECASE
+)
+FILE_PATH_RE = re.compile(r'var\s+file_path\s*=\s*"([^"]+)"')
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
+
+def parse_message(li) -> dict | None:
+    header_p = li.select_one("._header p")
+    if not header_p:
+        return None
+
+    match = DATE_RE.search(header_p.get_text(" ", strip=True))
+    if not match:
+        return None
+    try:
+        posted_dt = dateparser.parse(match.group(1))
+    except Exception:
+        return None
+
+    title_tag = li.select_one("h4.post_title")
+    title = title_tag.get_text(" ", strip=True) if title_tag else ""
+    title = re.sub(r"\s+", " ", title).strip()
+
+    body_paras = [
+        p.get_text(" ", strip=True)
+        for p in li.select("._content.gallery-deatils > p")
+    ]
+    body_text = "\n".join(t for t in body_paras if t)
+
+    attachments = []
+    for a in li.select("ul.list-images li a"):
+        href = a.get("href", "")
+        name_tag = a.find_next_sibling("div", class_="media_name")
+        name = name_tag.get_text(strip=True) if name_tag else href
+        attachments.append({"name": name, "href": href})
+
+    return {
+        "id": li.get("id", ""),
+        "title": title,
+        "posted_at": posted_dt.isoformat(),
+        "body": body_text,
+        "attachments": attachments,
+    }
+
+
+def extract_messages(html: str) -> list[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+    items = soup.select("ul.list-row > li")
+    parsed = []
+    for li in items:
+        msg = parse_message(li)
+        if msg:
+            parsed.append(msg)
+    return parsed
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def run():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # --- Login ---
+    resp = session.post(
+        LOGIN_URL,
+        data={"username": USERNAME, "password": PASSWORD},
+        allow_redirects=True,
+    )
+    resp.raise_for_status()
+
+    if 'id="login-form"' in resp.text:
+        print("Login appears to have failed - check UDT_USERNAME/UDT_PASSWORD in .env, "
+              "or the site may need additional hidden form fields not seen "
+              "in the static HTML (check the Network tab's Form Data on submit).")
+        return
+
+    # --- Fetch activity page (all messages load on this one page) ---
+    activity_resp = session.get(ACTIVITY_URL)
+    activity_resp.raise_for_status()
+    all_messages = extract_messages(activity_resp.text)
+
+    if not all_messages:
+        print("No messages parsed - the page structure may differ from what "
+              "was inspected, or login didn't actually succeed. Inspect "
+              "activity_resp.text manually if this happens.")
+        return
+
+    filtered = [
+        m for m in all_messages
+        if dateparser.parse(m["posted_at"]) >= CUTOFF_DATE
+    ]
+    filtered.sort(key=lambda m: m["posted_at"], reverse=True)
+
+    # --- Download attachments ---
+    for m in filtered:
+        for att in m["attachments"]:
+            href = att["href"]
+            if not href:
+                continue
+            viewer_url = href if href.startswith("http") else f"{BASE_URL}{href}"
+            try:
+                viewer_resp = session.get(viewer_url)
+                match = FILE_PATH_RE.search(viewer_resp.text)
+                if not match:
+                    att["saved_as"] = None
+                    att["note"] = "Could not find file_path in viewer page"
+                    continue
+
+                file_url = match.group(1).replace("\\/", "/")
+                file_resp = session.get(file_url)
+                content_type = file_resp.headers.get("content-type", "")
+
+                ext = ".pdf" if "pdf" in content_type.lower() or file_url.lower().endswith(".pdf") else ""
+                if not ext and "." in file_url.rsplit("/", 1)[-1]:
+                    ext = "." + file_url.rsplit(".", 1)[-1]
+
+                safe_name = re.sub(r"[^\w\-. ]", "_", att["name"]) + ext
+                (PDF_DIR / safe_name).write_bytes(file_resp.content)
+                att["saved_as"] = str(PDF_DIR / safe_name)
+                att["source_url"] = file_url
+            except Exception as e:
+                att["saved_as"] = None
+                att["note"] = f"Download failed: {e}"
+
+    # --- Save ---
+    out_file = OUTPUT_DIR / f"messages_{datetime.now():%Y%m%d_%H%M%S}.json"
+    out_file.write_text(json.dumps(filtered, indent=2, ensure_ascii=False))
+    print(f"Saved {len(filtered)} messages to {out_file}")
+    print(f"PDFs (where successfully downloaded) are in {PDF_DIR}")
+
+
+if __name__ == "__main__":
+    run()
