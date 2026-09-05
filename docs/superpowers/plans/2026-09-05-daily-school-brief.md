@@ -3261,3 +3261,247 @@ for the implementation plan and current build status.
 
 Commit with a descriptive message (normal `git add`/`git commit`/`git
 push`, no force-push, no amend).
+
+---
+
+## Addendum 4: Prune portal archive/PDFs older than 2 months
+
+See the spec's "Retention" note (end of the "Month-start cutoff for
+WhatsApp; a git-committed archive + cursor for the portal" section) for
+rationale: committing PDFs to git grows the repo's binary history
+forever (a plain delete doesn't reclaim space without a history
+rewrite), so the portal archive is pruned each run — messages and their
+attachment files older than 2 calendar months are dropped before saving.
+Portal-only; WhatsApp's Drive log isn't touched by this project.
+
+### Task 20: Prune old portal messages/PDFs each run
+
+**Files:**
+- Modify: `portal_archive.py`
+- Modify: `tests/test_portal_archive.py`
+- Modify: `daily_brief.py`
+- Modify: `tests/test_daily_brief.py`
+- Modify: `README.md`
+
+- [ ] **Step 1: Write the failing tests for pruning**
+
+Add to `tests/test_portal_archive.py`:
+
+```python
+from dateutil.relativedelta import relativedelta
+
+
+def test_is_within_retention_keeps_recent_message():
+    now = datetime(2026, 9, 5)
+    recent = (now - timedelta(days=10)).isoformat()
+    assert portal_archive.is_within_retention(recent, now) is True
+
+
+def test_is_within_retention_drops_message_older_than_two_months():
+    now = datetime(2026, 9, 5)
+    old = (now - relativedelta(months=3)).isoformat()
+    assert portal_archive.is_within_retention(old, now) is False
+
+
+def test_prune_archive_keeps_recent_and_drops_old():
+    now = datetime(2026, 9, 5)
+    recent = {
+        "id": "1", "title": "t",
+        "posted_at": (now - timedelta(days=5)).isoformat(),
+        "body": "b", "attachments": [],
+    }
+    old = {
+        "id": "2", "title": "t",
+        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "body": "b", "attachments": [],
+    }
+
+    result = portal_archive.prune_archive([recent, old], now)
+
+    assert result == [recent]
+
+
+def test_prune_archive_deletes_orphaned_pdf(tmp_path):
+    now = datetime(2026, 9, 5)
+    pdf_path = tmp_path / "2_Homework.pdf"
+    pdf_path.write_bytes(b"pdf content")
+
+    old = {
+        "id": "2", "title": "t",
+        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "body": "b",
+        "attachments": [{"name": "Homework", "href": "x", "saved_as": str(pdf_path)}],
+    }
+
+    portal_archive.prune_archive([old], now)
+
+    assert not pdf_path.exists()
+
+
+def test_prune_archive_keeps_pdf_for_recent_message(tmp_path):
+    now = datetime(2026, 9, 5)
+    pdf_path = tmp_path / "1_Homework.pdf"
+    pdf_path.write_bytes(b"pdf content")
+
+    recent = {
+        "id": "1", "title": "t",
+        "posted_at": (now - timedelta(days=5)).isoformat(),
+        "body": "b",
+        "attachments": [{"name": "Homework", "href": "x", "saved_as": str(pdf_path)}],
+    }
+
+    portal_archive.prune_archive([recent], now)
+
+    assert pdf_path.exists()
+```
+
+Add `from dateutil.relativedelta import relativedelta` and `timedelta`
+(alongside the existing `datetime` import) to the top of
+`tests/test_portal_archive.py` if not already present.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_portal_archive.py -v`
+Expected: FAIL — `AttributeError: module 'portal_archive' has no
+attribute 'is_within_retention'` (and `'prune_archive'`)
+
+- [ ] **Step 3: Add pruning to `portal_archive.py`**
+
+Add these to `portal_archive.py` (after the existing `save_archive`
+function, at the end of the file), and add `from dateutil.relativedelta
+import relativedelta` to the imports at the top:
+
+```python
+RETENTION_MONTHS = 2
+
+
+def is_within_retention(posted_at: str, now: datetime | None = None) -> bool:
+    if now is None:
+        now = datetime.now()
+    retention_cutoff = now - relativedelta(months=RETENTION_MONTHS)
+    return dateparser.parse(posted_at) >= retention_cutoff
+
+
+def delete_attachments(messages: list[dict]) -> None:
+    for m in messages:
+        for att in m.get("attachments", []):
+            saved_as = att.get("saved_as")
+            if saved_as and Path(saved_as).exists():
+                Path(saved_as).unlink()
+
+
+def prune_archive(messages: list[dict], now: datetime | None = None) -> list[dict]:
+    kept = []
+    dropped = []
+    for m in messages:
+        if is_within_retention(m["posted_at"], now):
+            kept.append(m)
+        else:
+            dropped.append(m)
+    delete_attachments(dropped)
+    return kept
+```
+
+Update the module docstring's second paragraph (the one starting
+"Unlike the WhatsApp side...") to add one sentence at the end: "Messages
+(and their attachment files) older than `RETENTION_MONTHS` (2) are
+pruned from the archive and deleted from disk each run - committing
+PDFs to git grows the repo's binary history forever, so this keeps that
+growth bounded."
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_portal_archive.py -v`
+Expected: PASS (13 tests: 9 existing + 4 new)
+
+- [ ] **Step 5: Write the failing test for `daily_brief.py`'s pruning wiring**
+
+Add to `tests/test_daily_brief.py`:
+
+```python
+def test_gather_prunes_archive_before_saving(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(daily_brief, "compute_portal_cutoff", lambda: "fixed-cutoff")
+    monkeypatch.setattr(daily_brief, "fetch_recent_messages", lambda **kwargs: [{"id": "new", "title": "x"}])
+    monkeypatch.setattr(
+        daily_brief,
+        "merge_into_archive",
+        lambda new: [{"id": "new", "title": "x"}, {"id": "old", "title": "y"}],
+    )
+    monkeypatch.setattr(
+        daily_brief,
+        "prune_archive",
+        lambda archive: [m for m in archive if m["id"] != "old"],
+    )
+    monkeypatch.setattr(daily_brief, "save_archive", lambda archive: saved.setdefault("archive", archive))
+    monkeypatch.setattr(daily_brief, "save_last_run", lambda dt: saved.setdefault("last_run", dt))
+    monkeypatch.setattr(daily_brief, "fetch_recent_whatsapp_messages", lambda **kwargs: [])
+
+    result = daily_brief.gather()
+
+    assert result["portal"]["messages"] == [{"id": "new", "title": "x"}]
+    assert saved["archive"] == [{"id": "new", "title": "x"}]
+```
+
+- [ ] **Step 6: Run tests to verify they fail**
+
+Run: `.venv/bin/python -m pytest tests/test_daily_brief.py -v`
+Expected: FAIL — the new test fails because `daily_brief.py` doesn't
+call `prune_archive` yet, so `result["portal"]["messages"]` still
+contains the "old" entry that the mocked `prune_archive` would have
+removed.
+
+- [ ] **Step 7: Wire pruning into `daily_brief.py`**
+
+Update the import line:
+
+```python
+from portal_archive import compute_portal_cutoff, merge_into_archive, prune_archive, save_archive, save_last_run
+```
+
+Update the portal branch of `gather()` to:
+
+```python
+    try:
+        portal_cutoff = compute_portal_cutoff()
+        new_messages = fetch_recent_messages(cutoff=portal_cutoff, download_attachments=True)
+        full_archive = merge_into_archive(new_messages)
+        pruned_archive = prune_archive(full_archive)
+        save_archive(pruned_archive)
+        save_last_run(run_started_at)
+        result["portal"]["messages"] = pruned_archive
+    except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
+        result["portal"]["error"] = f"{type(e).__name__}: {e}"
+```
+
+(Only these two changes: the import line, and this one try block. Rest
+of the file - docstring, `SourceResult`, `run()`, `__main__` - unchanged.)
+
+- [ ] **Step 8: Run the full suite to verify everything passes**
+
+Run: `.venv/bin/python -m pytest tests/ -v`
+Expected: PASS (all tests across every file)
+
+- [ ] **Step 9: Update `README.md`'s retention note**
+
+The exact current wording of this note may already differ slightly from
+what's shown below (it may have been hand-edited after this plan was
+written) - find whatever bullet in the "Notes" section currently
+discusses `data/` growth/pruning/binary-blob-history, and replace it
+with:
+
+```
+- Portal messages and their attachment PDFs older than 2 calendar months
+  are pruned from `data/portal_messages.json` and deleted from
+  `data/pdfs/` each run (see `portal_archive.py`'s `RETENTION_MONTHS`).
+  Deleting a file doesn't reclaim git history size on its own though —
+  the blob still exists in past commits until a history rewrite
+  (`git gc`, BFG, `git filter-repo`), so repo size still grows slowly
+  over time even with pruning in place, just far more slowly than
+  without it.
+```
+
+- [ ] **Step 10: Commit**
+
+Commit with a descriptive message (normal `git add`/`git commit`/`git
+push`, no force-push, no amend).
