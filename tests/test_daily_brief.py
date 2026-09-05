@@ -1,3 +1,5 @@
+import json
+
 import daily_brief
 
 
@@ -10,7 +12,7 @@ def test_gather_captures_portal_error(monkeypatch):
 
     result = daily_brief.gather()
 
-    assert result["portal"]["error"] == "login failed"
+    assert result["portal"]["error"] == "RuntimeError: login failed"
     assert result["portal"]["messages"] == []
     assert result["whatsapp"]["error"] is None
     assert result["whatsapp"]["messages"] == []
@@ -37,5 +39,21 @@ def test_gather_captures_whatsapp_error(monkeypatch):
 
     result = daily_brief.gather()
 
-    assert result["whatsapp"]["error"] == "drive unreachable"
+    assert result["whatsapp"]["error"] == "RuntimeError: drive unreachable"
     assert result["portal"]["error"] is None
+
+
+def test_run_writes_output_file(monkeypatch, tmp_path):
+    fixed_result = {
+        "portal": {"messages": [{"title": "x"}], "error": None},
+        "whatsapp": {"messages": [], "error": "RuntimeError: drive unreachable"},
+    }
+    monkeypatch.setattr(daily_brief, "gather", lambda: fixed_result)
+    output_path = tmp_path / "out.json"
+    monkeypatch.setattr(daily_brief, "OUTPUT_PATH", output_path)
+
+    result = daily_brief.run()
+
+    assert result == fixed_result
+    assert output_path.exists()
+    assert json.loads(output_path.read_text()) == fixed_result

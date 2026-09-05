@@ -29,12 +29,12 @@ def gather() -> dict:
     try:
         result["portal"]["messages"] = fetch_recent_messages(download_attachments=False)
     except Exception as e:
-        result["portal"]["error"] = str(e)
+        result["portal"]["error"] = f"{type(e).__name__}: {e}"
 
     try:
         result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages()
     except Exception as e:
-        result["whatsapp"]["error"] = str(e)
+        result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
 
     return result
 

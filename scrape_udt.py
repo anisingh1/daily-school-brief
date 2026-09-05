@@ -42,12 +42,6 @@ PASSWORD = os.getenv("UDT_PASSWORD")
 
 LOOKBACK_HOURS = float(os.getenv("LOOKBACK_HOURS", "36"))
 
-if not USERNAME or not PASSWORD:
-    raise SystemExit(
-        "UDT_USERNAME and/or UDT_PASSWORD are not set. "
-        "Copy .env.example to .env and fill in your real credentials."
-    )
-
 OUTPUT_DIR = Path(__file__).parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 PDF_DIR = OUTPUT_DIR / "pdfs"
@@ -123,6 +117,11 @@ def extract_messages(html: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def login(session) -> None:
+    if not USERNAME or not PASSWORD:
+        raise RuntimeError(
+            "UDT_USERNAME and/or UDT_PASSWORD are not set. "
+            "Copy .env.example to .env and fill in your real credentials."
+        )
     resp = session.post(
         LOGIN_URL,
         data={"username": USERNAME, "password": PASSWORD},
