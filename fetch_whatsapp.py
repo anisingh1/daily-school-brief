@@ -1,52 +1,114 @@
 """
-Fetches WhatsApp group messages forwarded via phone automation.
+Fetches WhatsApp group messages captured via phone automation as email.
 
-Messages are captured by a MacroDroid rule on an Android phone (see
-docs/PHONE_SETUP.md) which appends one JSON line per message to a file
-in a Google Drive folder. This module reads that file via the Drive API
-using a service account (see google_drive.py) and filters to a rolling
-lookback window, or an explicit absolute cutoff when one is provided
-(used by daily_brief.py's orchestrated pipeline cutoff).
+Messages are captured by two MacroDroid rules on an Android phone (see
+docs/PHONE_SETUP.md):
+  - A Notification Received rule (WhatsApp, filtered to the school
+    group's chat name) sends a plain email for each text message -
+    Subject = sender, Body = message text, Date = when it arrived.
+  - A File Added rule (watching WhatsApp's own auto-save "Documents"
+    folder) sends an email with the new file attached whenever a
+    document arrives in any chat.
+
+Both rules send to the same inbound address - a Gmail "+" alias of the
+account already used for outbound mail (see WHATSAPP_EMAIL_TO below) -
+so this module can find them with a single IMAP search, without a
+separate Google Cloud project or service account. It reuses the same
+Gmail App Password already configured for send_email.py.
 
 SETUP:
-    - Create a Google Cloud service account with Drive API access.
-    - Share the Drive folder containing the WhatsApp log file with the
-      service account's email as Viewer.
-    - Set GOOGLE_SERVICE_ACCOUNT_JSON (a file path, or the raw JSON key
-      content) and WHATSAPP_DRIVE_FILE_ID (the Drive file ID of the
-      JSONL log) in .env.
+    - Enable IMAP in the Gmail account's settings (Settings -> Forwarding
+      and POP/IMAP -> Enable IMAP).
+    - Set WHATSAPP_EMAIL_TO in .env to the "+" alias address the phone
+      sends to, e.g. "you+whatsapp@gmail.com" (Gmail delivers "+" alias
+      mail to the same inbox, so this module can filter for it via IMAP
+      search without any separate account or server-side filter).
 
 USAGE:
     python fetch_whatsapp.py
 """
 
-import json
+import email
+import imaplib
 import os
 from datetime import datetime, timedelta
+from email.message import Message
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 from dateutil import parser as dateparser
 from dotenv import load_dotenv
 
-import google_drive
-
 load_dotenv()
 
-SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-DRIVE_FILE_ID = os.getenv("WHATSAPP_DRIVE_FILE_ID")
+IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
+IMAP_PORT = int(os.getenv("IMAP_PORT", "993"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
+WHATSAPP_EMAIL_TO = os.getenv("WHATSAPP_EMAIL_TO")
 LOOKBACK_HOURS = float(os.getenv("LOOKBACK_HOURS", "36"))
 
+ATTACHMENTS_DIR = Path(__file__).parent / "data" / "pdfs"
 
-def parse_jsonl(text: str) -> list[dict]:
-    messages = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            messages.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return messages
+
+def _is_pdf_part(part: Message) -> bool:
+    if part.get_content_type() == "application/pdf":
+        return True
+    filename = part.get_filename() or ""
+    return part.get_content_disposition() == "attachment" and filename.lower().endswith(".pdf")
+
+
+def _save_pdf_attachment(part: Message, uid: str, save_dir: Path) -> dict:
+    filename = part.get_filename() or f"{uid}.pdf"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    dest = save_dir / f"whatsapp_{uid}_{filename}"
+    if not dest.exists():
+        dest.write_bytes(part.get_payload(decode=True))
+    return {"name": filename, "saved_as": str(dest)}
+
+
+def parse_email_message(msg: Message, uid: str, save_dir: Path = ATTACHMENTS_DIR) -> dict:
+    """Turn one captured email into a WhatsApp message record.
+
+    A PDF attachment (application/pdf, or an "attachment"-disposition
+    part with a .pdf filename) is saved to disk and referenced by
+    `saved_as` - the same shape scrape_udt.py uses for portal
+    attachments, so the skill's existing "Read any attachment with a
+    saved_as path" step applies here too. Non-PDF attachments (e.g.
+    images) are intentionally ignored - only their absence is asserted,
+    not walked further.
+    """
+    sender = msg.get("Subject", "") or ""
+    timestamp = parsedate_to_datetime(msg.get("Date", "")).isoformat()
+    text_parts = []
+    attachments = []
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.is_multipart():
+                continue
+            if _is_pdf_part(part):
+                attachments.append(_save_pdf_attachment(part, uid, save_dir))
+            elif (
+                part.get_content_type() == "text/plain"
+                and part.get_content_disposition() != "attachment"
+            ):
+                payload = part.get_payload(decode=True)
+                if payload:
+                    charset = part.get_content_charset() or "utf-8"
+                    text_parts.append(payload.decode(charset, errors="replace"))
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            charset = msg.get_content_charset() or "utf-8"
+            text_parts.append(payload.decode(charset, errors="replace"))
+
+    return {
+        "timestamp": timestamp,
+        "sender": sender,
+        "text": "".join(text_parts).strip(),
+        "attachments": attachments,
+    }
 
 
 def filter_recent(
@@ -75,17 +137,41 @@ def filter_recent(
     return filtered
 
 
+def _connect_imap() -> imaplib.IMAP4_SSL:
+    if not SMTP_USERNAME or not SMTP_APP_PASSWORD or not WHATSAPP_EMAIL_TO:
+        raise RuntimeError(
+            "SMTP_USERNAME, SMTP_APP_PASSWORD, and/or WHATSAPP_EMAIL_TO are not set."
+        )
+    conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    conn.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
+    conn.select("INBOX")
+    return conn
+
+
 def fetch_recent_whatsapp_messages(
     lookback_hours: float | None = None, cutoff: datetime | None = None
 ) -> list[dict]:
-    if not SERVICE_ACCOUNT_JSON or not DRIVE_FILE_ID:
-        raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON and/or WHATSAPP_DRIVE_FILE_ID are not set."
-        )
-    drive_service = google_drive.build_client(SERVICE_ACCOUNT_JSON)
-    text = google_drive.download_text(drive_service, DRIVE_FILE_ID)
-    messages = parse_jsonl(text)
-    return filter_recent(messages, lookback_hours=lookback_hours, cutoff=cutoff)
+    if cutoff is None:
+        if lookback_hours is None:
+            lookback_hours = LOOKBACK_HOURS
+        cutoff = datetime.now().astimezone() - timedelta(hours=lookback_hours)
+    since_date = cutoff.strftime("%d-%b-%Y")
+
+    conn = _connect_imap()
+    try:
+        _, data = conn.search(None, "TO", f'"{WHATSAPP_EMAIL_TO}"', "SINCE", since_date)
+        uids = data[0].split() if data and data[0] else []
+        messages = []
+        for uid in uids:
+            _, msg_data = conn.fetch(uid, "(RFC822)")
+            raw = msg_data[0][1]
+            msg = email.message_from_bytes(raw)
+            messages.append(parse_email_message(msg, uid.decode()))
+    finally:
+        conn.logout()
+
+    return filter_recent(messages, cutoff=cutoff)
+
 
 if __name__ == "__main__":
     for msg in fetch_recent_whatsapp_messages():

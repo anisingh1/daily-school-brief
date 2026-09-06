@@ -16,12 +16,14 @@ SETUP:
     - Set EMAIL_TO (the recipient address) in .env.
 
 USAGE:
-    python send_email.py
+    python send_email.py             # sends the email
+    python send_email.py --preview   # skips SMTP, writes output/daily_brief_preview.html
 """
 
 import json
 import os
 import smtplib
+import sys
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -33,13 +35,13 @@ from render_email import render_brief_html
 load_dotenv()
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
 CONTENT_PATH = Path(__file__).parent / "output" / "daily_brief_content.json"
-
+PREVIEW_PATH = Path(__file__).parent / "output" / "daily_brief_preview.html"
 
 def _parse_recipients(value: str) -> list[str]:
     """Split a comma-separated recipient string into individual addresses.
@@ -65,19 +67,22 @@ def send_brief_email(subject: str, html_body: str) -> None:
     msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html"))
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
         server.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
         server.sendmail(SMTP_USERNAME, recipients, msg.as_string())
 
 
-def run() -> None:
+def run(preview: bool = False) -> None:
     data = json.loads(CONTENT_PATH.read_text())
     html = render_brief_html(data)
+    if preview:
+        PREVIEW_PATH.write_text(html)
+        print(f"Preview written to {PREVIEW_PATH}")
+        return
     subject = f"Daily School Brief - {data.get('date', '')}"
     send_brief_email(subject, html)
     print(f"Email sent to {EMAIL_TO}")
 
 
 if __name__ == "__main__":
-    run()
+    run(preview="--preview" in sys.argv[1:])

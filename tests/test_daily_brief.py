@@ -112,7 +112,7 @@ def test_gather_uses_month_anchor_for_whatsapp_cutoff(monkeypatch):
 
     daily_brief.gather()
 
-    assert calls["cutoff"] == real_month_anchor()
+    assert calls["cutoff"] == real_month_anchor(months_back=3)
 
 
 def test_gather_uses_portal_cutoff_and_downloads_attachments(monkeypatch):

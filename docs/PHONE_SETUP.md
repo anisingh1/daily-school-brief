@@ -1,62 +1,78 @@
 # Phone-Side WhatsApp Capture Setup
 
-This captures messages from the school WhatsApp group without any
-unofficial WhatsApp client or automation library - it works entirely
-through Android's notification system, which WhatsApp's own app posts
-to normally.
+This captures messages (and documents) from the school WhatsApp group
+without any unofficial WhatsApp client or automation library - it works
+entirely through Android's own notification and file systems, and
+delivers everything as plain email so `fetch_whatsapp.py` only needs
+the Gmail App Password already set up for sending the brief (no Google
+Cloud project, service account, or Drive API).
 
 ## 1. Install MacroDroid
 
-From the Play Store. Free tier is enough for one rule.
+From the Play Store. Free tier is enough for these two rules.
 
-## 2. Create the capture rule
+## 2. Pick a capture address
+
+Use a Gmail "+" alias of the account already in `SMTP_USERNAME` -
+e.g. if that's `you@gmail.com`, use `you+whatsapp@gmail.com`. Gmail
+delivers "+" alias mail to the same inbox untouched, so no new account,
+filter, or label is required - `fetch_whatsapp.py` finds these emails by
+searching IMAP for mail addressed `TO` that alias. Put it in
+`WHATSAPP_EMAIL_TO` in `.env`.
+
+## 3. Create the text-message capture rule
 
 - Trigger: **Notification Received** -> app: WhatsApp -> title/text
   filter: matches the school group's exact chat name.
-- Action: **Write Text to File**, appending (not overwriting) one JSON
-  line per message to a local file, e.g.
-  `/storage/emulated/0/SchoolBrief/whatsapp_log.jsonl`, in this format:
+- Action: **Send Email** (MacroDroid's native email action, not "open
+  Gmail app"):
+  - To: the address from step 2
+  - Subject: `%notification_title%` (the sender's name)
+  - Body: `%notification_text%` (the message text)
 
-  ```json
-  {"timestamp": "%dtdate(yyyy-MM-dd'T'HH:mm:ssXXX)%", "sender": "%notification_title%", "text": "%notification_text%"}
-  ```
+  Unlike writing a JSON line to a file, a plain email body has no
+  escaping/quoting concerns - any message text is safe verbatim, so
+  there's no risk of a malformed line silently dropping a message.
 
-  (MacroDroid's exact variable names for notification title/text and
-  date formatting may differ slightly by version - check the "Local
-  Variables" / "Magic Text" reference in Configure Action for the
-  current equivalents.)
+## 4. Create the document capture rule
 
-  **Caveat - unescaped quotes/newlines:** `%notification_text%` is a
-  naive string paste into the JSON template. A message containing a
-  `"` or a line break will produce a malformed JSON line, which
-  `fetch_whatsapp.py`'s parser silently skips - that message is
-  silently lost. Check whether your MacroDroid tier's "Local
-  Variables" / "Magic Text" reference offers a JSON-encode/escape
-  action (or a JavaScript/scripting action that can JSON-encode a
-  variable) and apply it to `%notification_text%` (and, less
-  critically, `%notification_title%`) before writing the line. If no
-  such function is available in your tier, periodically spot-check the
-  Drive log file against the actual group history so you notice if
-  messages are being silently dropped.
+WhatsApp auto-saves every incoming document (from *any* chat, not just
+the school group - see caveat below) to a local folder on the phone,
+independent of any automation: `Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents/`
+(older WhatsApp versions used `WhatsApp/Media/WhatsApp Documents/`
+instead - check which exists on your phone).
 
-## 3. Install a folder-sync app
+- Trigger: **File Added/Modified** -> folder: the WhatsApp Documents
+  path above.
+- Action: **Send Email**, with the trigger's file attached:
+  - To: the address from step 2
+  - Subject: anything (not read by `fetch_whatsapp.py` for this rule)
+  - Attachment: the newly added file (MacroDroid's file-added trigger
+    exposes the file path as a local variable to attach)
 
-Install **Autosync for Google Drive** (or FolderSync, by MetaCtrl) from
-the Play Store. Configure a sync pair:
-- Local folder: `/storage/emulated/0/SchoolBrief/`
-- Remote folder: a Google Drive folder, e.g. `SchoolBrief/`
-- Direction: one-way, phone -> Drive
-- Sync trigger: on file change (or every few minutes)
+  **Caveat - not scoped to the school group:** WhatsApp doesn't
+  separate this folder by chat, so this rule will email *every*
+  document sent in *any* WhatsApp chat on the phone, not just the
+  school group. `fetch_whatsapp.py` only keeps PDF attachments (images
+  and other file types are ignored), which narrows this somewhat, but
+  a PDF from an unrelated chat would still be picked up and passed to
+  the brief. If that's a problem in practice, this needs a different
+  capture mechanism (e.g. an advanced MacroDroid config that reads the
+  WhatsApp document notification's attachment URI directly, which can
+  filter by chat name the same way the text rule does, but is less
+  consistently supported across Android/WhatsApp versions).
 
-## 4. Note the Drive file's ID
+## 5. Enable IMAP on the Gmail account
 
-Open the synced file in Google Drive on a browser; its share URL looks
-like `https://drive.google.com/file/d/<FILE_ID>/view`. Copy `<FILE_ID>`
-into `WHATSAPP_DRIVE_FILE_ID` in `.env` (see Task 8 for the service
-account that also needs read access to this file).
+Gmail Settings -> **See all settings** -> **Forwarding and POP/IMAP**
+tab -> enable IMAP. This is required for `fetch_whatsapp.py` to read
+the captured emails; the same Gmail App Password used for
+`SMTP_APP_PASSWORD` works for IMAP too, no separate credential needed.
 
 ## Verifying it works
 
 Send a test message in the school WhatsApp group, wait a minute, then
-check the Drive file's content updates from your Mac's browser (or via
-`python fetch_whatsapp.py` once Task 8's service account is set up).
+check `WHATSAPP_EMAIL_TO`'s inbox for the captured email (or run
+`python fetch_whatsapp.py` once steps 2-5 are done). Repeat with a test
+PDF sent in the group to verify the document rule and attachment
+saving (into `data/pdfs/`, prefixed `whatsapp_`) both work.

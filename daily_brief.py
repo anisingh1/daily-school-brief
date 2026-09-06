@@ -63,7 +63,9 @@ def gather() -> dict[str, SourceResult]:
         result["portal"]["error"] = f"{type(e).__name__}: {e}"
 
     try:
-        result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(cutoff=month_anchor())
+        result["whatsapp"]["messages"] = fetch_recent_whatsapp_messages(
+            cutoff=month_anchor(months_back=3)
+        )
     except Exception as e:  # noqa: BLE001 - best-effort per source, see module docstring
         result["whatsapp"]["error"] = f"{type(e).__name__}: {e}"
 

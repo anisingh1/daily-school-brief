@@ -31,10 +31,6 @@ def test_send_brief_email_sends_via_smtp(monkeypatch):
             calls.setdefault("sequence", []).append("exit")
             return False
 
-        def starttls(self):
-            calls.setdefault("sequence", []).append("starttls")
-            calls["starttls"] = True
-
         def login(self, username, password):
             calls.setdefault("sequence", []).append("login")
             calls["login"] = (username, password)
@@ -44,16 +40,16 @@ def test_send_brief_email_sends_via_smtp(monkeypatch):
             calls["sendmail"] = (from_addr, to_addrs)
             calls["msg_contains_html"] = "<p>body</p>" in msg
 
-    monkeypatch.setattr(send_email.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(send_email.smtplib, "SMTP_SSL", FakeSMTP)
 
     send_email.send_brief_email("Test Subject", "<p>body</p>")
 
     assert calls["host"] == "smtp.gmail.com"
-    assert calls["starttls"] is True
+    assert calls["port"] == 465
     assert calls["login"] == ("me@gmail.com", "app-pass")
     assert calls["sendmail"] == ("me@gmail.com", ["family@gmail.com"])
     assert calls["msg_contains_html"] is True
-    assert calls["sequence"] == ["enter", "starttls", "login", "sendmail", "exit"]
+    assert calls["sequence"] == ["enter", "login", "sendmail", "exit"]
 
 
 def test_send_brief_email_splits_comma_separated_recipients(monkeypatch):
@@ -73,16 +69,13 @@ def test_send_brief_email_splits_comma_separated_recipients(monkeypatch):
         def __exit__(self, *args):
             return False
 
-        def starttls(self):
-            pass
-
         def login(self, username, password):
             pass
 
         def sendmail(self, from_addr, to_addrs, msg):
             calls["sendmail"] = (from_addr, to_addrs)
 
-    monkeypatch.setattr(send_email.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(send_email.smtplib, "SMTP_SSL", FakeSMTP)
 
     send_email.send_brief_email("Test Subject", "<p>body</p>")
 

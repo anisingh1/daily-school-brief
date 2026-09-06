@@ -29,7 +29,7 @@ def test_compute_portal_cutoff_uses_last_run_when_present(monkeypatch):
 def test_compute_portal_cutoff_falls_back_to_month_anchor_when_absent(monkeypatch):
     monkeypatch.setattr(portal_archive, "read_last_run", lambda: None)
     from cutoff import month_anchor
-    assert portal_archive.compute_portal_cutoff() == month_anchor()
+    assert portal_archive.compute_portal_cutoff() == month_anchor(months_back=3)
 
 
 def test_load_archive_returns_empty_list_when_file_missing(tmp_path, monkeypatch):
@@ -98,9 +98,9 @@ def test_is_within_retention_keeps_recent_message():
     assert portal_archive.is_within_retention(recent, now) is True
 
 
-def test_is_within_retention_drops_message_older_than_two_months():
+def test_is_within_retention_drops_message_older_than_three_months():
     now = datetime(2026, 9, 5)
-    old = (now - relativedelta(months=3)).isoformat()
+    old = (now - relativedelta(months=4)).isoformat()
     assert portal_archive.is_within_retention(old, now) is False
 
 
@@ -113,7 +113,7 @@ def test_prune_archive_keeps_recent_and_drops_old():
     }
     old = {
         "id": "2", "title": "t",
-        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "posted_at": (now - relativedelta(months=4)).isoformat(),
         "body": "b", "attachments": [],
     }
 
@@ -129,7 +129,7 @@ def test_prune_archive_deletes_orphaned_pdf(tmp_path):
 
     old = {
         "id": "2", "title": "t",
-        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "posted_at": (now - relativedelta(months=4)).isoformat(),
         "body": "b",
         "attachments": [{"name": "Homework", "href": "x", "saved_as": str(pdf_path)}],
     }
@@ -172,7 +172,7 @@ def test_prune_archive_handles_empty_id_messages_with_distinct_attachment_paths(
 
     old = {
         "id": "", "title": "t",
-        "posted_at": (now - relativedelta(months=3)).isoformat(),
+        "posted_at": (now - relativedelta(months=4)).isoformat(),
         "body": "b",
         "attachments": [{"name": "Homework", "href": "/viewer1", "saved_as": str(old_pdf_path)}],
     }

@@ -37,8 +37,10 @@ Then writes it as structured content and sends it as an HTML email.
    `portal` and `whatsapp`, each having `messages` (a list) and `error`
    (a string or null). The portal's `messages` list is the FULL
    accumulated archive (every message ever scraped), not just what's
-   new this run. Portal messages may include an `attachments` list; a
-   downloaded attachment has a `saved_as` local file path.
+   new this run. Portal and WhatsApp messages alike may include an
+   `attachments` list; a downloaded attachment has a `saved_as` local
+   file path (WhatsApp attachments are always PDFs - other file types
+   are filtered out before this point).
 
    If `python daily_brief.py` fails to run (crashes, `python` not
    found, etc.) or `output/daily_brief_input.json` does not exist
@@ -54,29 +56,33 @@ Then writes it as structured content and sends it as an HTML email.
    run:
 
    ```bash
-   git add data/
-   git diff --cached --quiet || git commit -m "Update portal archive"
-   git push
+   python commit_archive.py
    ```
 
    This is necessary because a scheduled cloud routine clones this repo
    fresh on every run - anything written to `data/` during this run is
-   lost unless it's committed and pushed back before the run ends. If
-   this step fails for any reason - no push access, or a rejected
-   non-fast-forward push because another run or a human pushed in
-   between - just note it as a warning in the brief and continue. Do
-   NOT force-push, rebase, or otherwise try to resolve a rejected push;
-   a failure here doesn't affect today's brief, only whether tomorrow's
-   run starts from today's updated archive, and it's safe to just let
-   the next run retry from wherever the remote actually is.
+   lost unless it's committed and pushed back before the run ends.
+   `commit_archive.py` stages `data/`, commits only if there's something
+   staged, and pushes - see its docstring for exactly what it runs. If
+   the push is rejected (no push access, or a non-fast-forward rejection
+   because another run or a human pushed in between), the script prints
+   a warning instead of raising - just note that warning in the brief
+   and continue. A failure here doesn't affect today's brief, only
+   whether tomorrow's run starts from today's updated archive, and it's
+   safe to just let the next run retry from wherever the remote actually
+   is. Only treat this step as a hard failure (worth stopping over) if
+   the script raises/exits with an error instead of printing a push
+   warning - that means `git add` or `git commit` itself failed, which
+   is not the expected/recoverable case.
 
 3. Read `output/daily_brief_input.json` (path relative to the project
    root from step 1 - this only works if you're actually in that
    directory when you run step 1).
 
-4. For each portal message that has an attachment with a `saved_as`
-   path, `Read` that file directly (Claude Code's `Read` tool handles
-   PDFs natively). Homework, agenda, and dress-code details are often
+4. For each portal or WhatsApp message that has an attachment with a
+   `saved_as` path, `Read` that file directly (Claude Code's `Read`
+   tool handles PDFs natively). Homework, agenda, and dress-code
+   details are often
    inside the document itself - a monthly planner PDF, for instance -
    rather than in the message body text, so don't rely on the body
    text alone when an attachment is present.
@@ -114,8 +120,20 @@ Then writes it as structured content and sends it as an HTML email.
    school Friday for a holiday," a schedule change affecting everyone)
    is unaffected by this and should still be included normally.
 
+   - **Classwork**: what was covered in class (typically marked "C.W."
+     in a Flow of the Day post) on the most recent school day.
    - **Homework**: any assignment, reading, or task mentioned for the
-     child to do.
+     child to do (typically marked "Recap" in a Flow of the Day post).
+
+     **Carry-forward rule**: Classwork and Homework should always
+     reflect the most recent school day that had a Flow of the Day
+     post, even if that's not today. If today (IST) is a weekend or a
+     holiday (so no new Flow of the Day post exists for today), just
+     carry forward the most recent available post's classwork and
+     homework rather than leaving these sections empty - don't add a
+     warning or note explaining why (a holiday/weekend is expected,
+     ordinary, and already evident from the activity calendar - it
+     isn't an anomaly worth flagging).
    - **Tomorrow's agenda**: events, special activities, holidays, timing
      changes, or notices that apply to tomorrow specifically (use
      today's date in IST - India Standard Time, UTC+5:30, the school's
@@ -163,7 +181,11 @@ Then writes it as structured content and sends it as an HTML email.
      `error` (from step 5) - empty list if none.
    - `aviraj_highlight`: a single string if a message specifically named
      Aviraj (from the highlight rule above), otherwise `null`.
-   - `homework`: list of strings, one per homework item - empty list if
+   - `classwork`: list of strings, one per classwork item (from the
+     most recent school day, per the carry-forward rule) - empty list
+     if none.
+   - `homework`: list of strings, one per homework item (from the most
+     recent school day, per the carry-forward rule) - empty list if
      none.
    - `agenda`: list of strings, one per tomorrow's-agenda item - empty
      list if none.

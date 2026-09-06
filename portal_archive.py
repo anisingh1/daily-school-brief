@@ -6,22 +6,22 @@ long as whoever invokes daily_brief.py commits and pushes data/
 afterward (see the daily-school-brief skill, which does this as an
 explicit step).
 
-Unlike the WhatsApp side (whose Drive log already retains full history
-on its own), the portal's activity page shows an unknown retention
-window, so daily_brief.py builds its own permanent archive here: every
-message ever scraped, deduplicated by message id, merged with each new
-fetch. The brief is always generated from the FULL archive, never just
-the newest fetch, so nothing posted at any point in the past is ever
-missed once cursor efficiency is reintroduced.
+Unlike the WhatsApp side (whose captured-email inbox already retains
+full history on its own), the portal's activity page shows an unknown
+retention window, so daily_brief.py builds its own permanent archive
+here: every message ever scraped, deduplicated by message id, merged
+with each new fetch. The brief is always generated from the FULL
+archive, never just the newest fetch, so nothing posted at any point
+in the past is ever missed once cursor efficiency is reintroduced.
 
 Cutoff logic: if no cursor has been saved yet (fresh setup, or the
-data/ directory was reset), fall back to cutoff.month_anchor() so a
-start-of-month document is still caught on the first run. Otherwise,
-use the last run's timestamp - only fetch what's new, merge it into the
-archive, and advance the cursor. Messages (and their attachment files)
-older than `RETENTION_MONTHS` (2) are pruned from the archive and
-deleted from disk each run - committing PDFs to git grows the repo's
-binary history forever, so this keeps that growth bounded.
+data/ directory was reset), fall back to cutoff.month_anchor(months_back=3)
+so a document from a few months back is still caught on the first run.
+Otherwise, use the last run's timestamp - only fetch what's new, merge
+it into the archive, and advance the cursor. Messages (and their
+attachment files) older than `RETENTION_MONTHS` (3) are pruned from the
+archive and deleted from disk each run - committing PDFs to git grows
+the repo's binary history forever, so this keeps that growth bounded.
 """
 
 import json
@@ -57,7 +57,7 @@ def compute_portal_cutoff() -> datetime:
     last_run = read_last_run()
     if last_run is not None:
         return last_run
-    return month_anchor()
+    return month_anchor(months_back=3)
 
 
 def load_archive() -> list[dict]:
@@ -87,7 +87,7 @@ def save_archive(messages: list[dict]) -> None:
     ARCHIVE_PATH.write_text(json.dumps(messages, indent=2, ensure_ascii=False))
 
 
-RETENTION_MONTHS = 2
+RETENTION_MONTHS = 3
 
 
 def is_within_retention(posted_at: str, now: datetime | None = None) -> bool:

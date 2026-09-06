@@ -1,12 +1,65 @@
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 
 
-def test_parse_jsonl_skips_blank_and_invalid_lines():
-    from fetch_whatsapp import parse_jsonl
+def test_parse_email_message_extracts_plain_text_message(tmp_path):
+    from fetch_whatsapp import parse_email_message
 
-    text = '{"a": 1}\n\n not json \n{"b": 2}\n'
-    result = parse_jsonl(text)
-    assert result == [{"a": 1}, {"b": 2}]
+    msg = EmailMessage()
+    msg["Subject"] = "Vandana Arora_Aviraj Class Teacher"
+    msg["Date"] = "Thu, 03 Sep 2026 13:09:00 +0530"
+    msg.set_content("Dear Parents\nGreetings!\nKindly check today's class work.")
+
+    result = parse_email_message(msg, uid="101", save_dir=tmp_path)
+
+    assert result == {
+        "timestamp": "2026-09-03T13:09:00+05:30",
+        "sender": "Vandana Arora_Aviraj Class Teacher",
+        "text": "Dear Parents\nGreetings!\nKindly check today's class work.",
+        "attachments": [],
+    }
+
+
+def test_parse_email_message_saves_pdf_attachment(tmp_path):
+    from fetch_whatsapp import parse_email_message
+
+    msg = EmailMessage()
+    msg["Subject"] = "Vandana Arora_Aviraj Class Teacher"
+    msg["Date"] = "Thu, 03 Sep 2026 13:09:00 +0530"
+    msg.set_content("")
+    msg.add_attachment(
+        b"%PDF-1.4 fake pdf bytes",
+        maintype="application",
+        subtype="pdf",
+        filename="circular.pdf",
+    )
+
+    result = parse_email_message(msg, uid="202", save_dir=tmp_path)
+
+    assert result["attachments"] == [
+        {"name": "circular.pdf", "saved_as": str(tmp_path / "whatsapp_202_circular.pdf")}
+    ]
+    assert (tmp_path / "whatsapp_202_circular.pdf").read_bytes() == b"%PDF-1.4 fake pdf bytes"
+
+
+def test_parse_email_message_ignores_non_pdf_attachment(tmp_path):
+    from fetch_whatsapp import parse_email_message
+
+    msg = EmailMessage()
+    msg["Subject"] = "Vandana Arora_Aviraj Class Teacher"
+    msg["Date"] = "Thu, 03 Sep 2026 13:09:00 +0530"
+    msg.set_content("")
+    msg.add_attachment(
+        b"fake image bytes",
+        maintype="image",
+        subtype="jpeg",
+        filename="photo.jpg",
+    )
+
+    result = parse_email_message(msg, uid="303", save_dir=tmp_path)
+
+    assert result["attachments"] == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_filter_recent_includes_message_within_window():
@@ -80,6 +133,42 @@ def test_filter_recent_skips_entry_with_overflow_timestamp():
     messages = [{"timestamp": "99999999999999999999", "sender": "A", "text": "bad"}]
     result = filter_recent(messages, lookback_hours=36)
     assert result == []
+
+
+def test_fetch_recent_whatsapp_messages_parses_imap_search_results(monkeypatch, tmp_path):
+    import fetch_whatsapp
+
+    msg = EmailMessage()
+    msg["Subject"] = "Vandana Arora_Aviraj Class Teacher"
+    msg["Date"] = "Thu, 03 Sep 2026 13:09:00 +0530"
+    msg.set_content("Kindly check today's class work.")
+    raw = msg.as_bytes()
+
+    class FakeConn:
+        def __init__(self):
+            self.logged_out = False
+
+        def search(self, charset, *criteria):
+            return "OK", [b"42"]
+
+        def fetch(self, uid, parts):
+            assert uid == b"42"
+            return "OK", [(b"42 (RFC822 {n}", raw)]
+
+        def logout(self):
+            self.logged_out = True
+
+    fake_conn = FakeConn()
+    monkeypatch.setattr(fetch_whatsapp, "_connect_imap", lambda: fake_conn)
+    monkeypatch.setattr(fetch_whatsapp, "ATTACHMENTS_DIR", tmp_path)
+
+    cutoff = datetime(2026, 9, 1).astimezone()
+    result = fetch_whatsapp.fetch_recent_whatsapp_messages(cutoff=cutoff)
+
+    assert len(result) == 1
+    assert result[0]["sender"] == "Vandana Arora_Aviraj Class Teacher"
+    assert result[0]["text"] == "Kindly check today's class work."
+    assert fake_conn.logged_out is True
 
 
 def test_filter_recent_uses_explicit_cutoff_over_lookback_hours():

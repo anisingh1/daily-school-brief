@@ -1,7 +1,7 @@
 # Daily School Brief
 
 Pulls together messages from the school web portal and (via phone-forwarded
-messages synced through Google Drive) the school WhatsApp group, and
+messages captured as email) the school WhatsApp group, and
 produces a daily brief covering homework, tomorrow's agenda, tomorrow's
 dress code, and other reminders.
 
@@ -19,14 +19,16 @@ for the implementation plan and current build status.
   message ID + name), so the same document isn't re-downloaded every
   run. Can be run directly (`python scrape_udt.py`), or imported
   (`fetch_recent_messages()`) for use by other scripts.
-- **`fetch_whatsapp.py`** — reads WhatsApp group messages forwarded via
-  phone automation into a JSONL file on Google Drive (see
-  `docs/PHONE_SETUP.md`), via the Google Drive API using a service
-  account, filtered to the same rolling lookback window (standalone) or
-  the orchestrated pipeline's month-start cutoff.
+- **`fetch_whatsapp.py`** — reads WhatsApp group messages and documents
+  forwarded via phone automation as email (see `docs/PHONE_SETUP.md`),
+  via IMAP using the same Gmail App Password as `send_email.py` (no
+  Google Cloud project or service account), filtered to the same
+  rolling lookback window (standalone) or the orchestrated pipeline's
+  month-start cutoff. PDF attachments are saved to `data/pdfs/`
+  (prefixed `whatsapp_`); other attachment types are ignored.
 - **`cutoff.py`** — `month_anchor()`: 2 days before the start of the
   current calendar month. Used directly for the WhatsApp fetch (its
-  Drive log already retains its own full history, so re-scanning the
+  inbox already retains its own full history, so re-scanning the
   current month is enough), and as `portal_archive.py`'s fallback when
   no portal cursor has been recorded yet.
 - **`portal_archive.py`** — persists the portal message archive
@@ -48,11 +50,17 @@ for the implementation plan and current build status.
   content.
 - **`send_email.py`** — reads `output/daily_brief_content.json`, renders
   it via `render_email.py`, and sends it as an HTML email via Gmail SMTP.
+  `python send_email.py --preview` skips SMTP and writes
+  `output/daily_brief_preview.html` instead, for local dry runs.
+- **`commit_archive.py`** — stages, commits (only if there's something
+  staged), and pushes `data/`, so the archive/cursor persist across
+  future runs. A rejected push is reported as a printed warning, not
+  raised - see its docstring.
 - The `daily-school-brief` Claude Code skill
   (`.claude/skills/daily-school-brief/SKILL.md`) reads that envelope,
   `Read`s any downloaded PDF attachments directly (homework/agenda/
   dress-code details are often inside the document, not just the message
-  text), commits and pushes `data/` so the archive/cursor persist across
+  text), runs `commit_archive.py` so the archive/cursor persist across
   future runs, categorizes everything into homework / tomorrow's agenda
   / dress code / other reminders, and writes `output/daily_brief_content.json`
   and runs `send_email.py` to send it as an HTML email. A scheduled cloud
@@ -77,10 +85,10 @@ for the implementation plan and current build status.
    ```
    Then edit `.env` and fill in your real `UDT_USERNAME`, `UDT_PASSWORD`,
    desired `LOOKBACK_HOURS` (default 36, only used for standalone runs),
-   and — once the WhatsApp side is set up — `GOOGLE_SERVICE_ACCOUNT_JSON`
-   and `WHATSAPP_DRIVE_FILE_ID`, and `SMTP_USERNAME`/`SMTP_APP_PASSWORD`/
-   `EMAIL_TO` for sending the brief by email (see `send_email.py`'s
-   docstring for how to create a Gmail App Password).
+   `SMTP_USERNAME`/`SMTP_APP_PASSWORD`/`EMAIL_TO` for sending the brief
+   by email (see `send_email.py`'s docstring for how to create a Gmail
+   App Password), and — once the WhatsApp side is set up (see
+   `docs/PHONE_SETUP.md`) — `WHATSAPP_EMAIL_TO`.
    **Never commit `.env`** - it's already in `.gitignore`.
 
 ## Run
@@ -120,8 +128,9 @@ for the implementation plan and current build status.
 - `data/last_run.json` — the portal cursor (`{"last_run": "<isoformat>"}`).
   Committed to this repo.
 - `data/pdfs/` — downloaded PDF (or other) attachments, named using the
-  message ID and their display name in the portal. Committed to this
-  repo; a file already present here is not re-downloaded.
+  message ID and their display name in the portal (prefixed `whatsapp_`
+  for ones from the WhatsApp document capture instead). Committed to
+  this repo; a file already present here is not re-downloaded.
 
 ## Notes
 
@@ -136,10 +145,17 @@ for the implementation plan and current build status.
   and extracting the real file URL from an embedded `file_path` JS
   variable, then downloading that URL directly (skipped if already
   downloaded).
-- WhatsApp messages are captured entirely through Android's normal
+- WhatsApp text messages are captured entirely through Android's normal
   notification system (via phone automation), not through any unofficial
-  WhatsApp client library — see the design spec for why.
-- Portal messages and their attachment PDFs older than 2 calendar months
+  WhatsApp client library — see the design spec for why. WhatsApp
+  document attachments are captured by watching WhatsApp's own
+  auto-save folder for new files - this folder isn't scoped to a
+  single chat, so a document from *any* WhatsApp chat on the phone gets
+  emailed and considered (non-PDF attachments are filtered out; see
+  `docs/PHONE_SETUP.md` for the tradeoff). Both are emailed to a Gmail
+  "+" alias and read via IMAP using the same App Password as
+  `send_email.py` - no Google Cloud project or service account.
+- Portal messages and their attachment PDFs older than 3 calendar months
   are pruned from `data/portal_messages.json` and deleted from
   `data/pdfs/` each run (see `portal_archive.py`'s `RETENTION_MONTHS`).
   Deleting a file doesn't reclaim git history size on its own though —

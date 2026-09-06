@@ -10,8 +10,9 @@ regardless of that day's content. Claude decides *what* goes in the
 brief; this module decides *how it looks*.
 
 Expected `data` keys: `date` (str), `warnings` (list[str]),
-`aviraj_highlight` (str | None), `homework` (list[str]), `agenda`
-(list[str]), `dress_code` (str | None), `reminders` (list[str]).
+`aviraj_highlight` (str | None), `classwork` (list[str]), `homework`
+(list[str]), `agenda` (list[str]), `dress_code` (str | None),
+`reminders` (list[str]).
 """
 
 from html import escape
@@ -44,6 +45,7 @@ _COLORS = {
     "warning_border": "#F59E0B",
     "highlight_bg": "#FEF9C3",
     "highlight_border": "#CA8A04",
+    "classwork_accent": "#0891B2",
     "homework_accent": "#2563EB",
     "agenda_accent": "#7C3AED",
     "dress_accent": "#EA580C",
@@ -77,6 +79,7 @@ def render_brief_html(data: dict) -> str:
     aviraj_highlight = (
         aviraj_highlight if aviraj_highlight and aviraj_highlight.strip() else None
     )
+    classwork = _as_list(data.get("classwork"))
     homework = _as_list(data.get("homework"))
     agenda = _as_list(data.get("agenda"))
     dress_code = data.get("dress_code")
@@ -112,6 +115,7 @@ def render_brief_html(data: dict) -> str:
     body = "".join([
         warning_html,
         highlight_html,
+        _section("🏫 Classwork", _COLORS["classwork_accent"], classwork),
         _section("📚 Homework", _COLORS["homework_accent"], homework),
         _section("📅 Tomorrow's Agenda", _COLORS["agenda_accent"], agenda),
         dress_html,
@@ -142,7 +146,7 @@ def render_brief_html(data: dict) -> str:
       </div>
       <div style="padding: 16px 24px; background: {_COLORS['page_bg']};
                   font-size: 12px; color: {_COLORS['muted']}; text-align: center;">
-        Generated automatically from the school portal and WhatsApp group.
+        Generated automatically from the UDT eschool portal and WhatsApp group.
       </div>
     </div>
   </body>
