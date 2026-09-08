@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "acceptEdits",
     "allow": [
       "Bash(python daily_brief.py:*)",
       "Bash(python send_email.py:*)",
