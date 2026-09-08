@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python daily_brief.py)",
+      "Bash(TZ='Asia/Kolkata' date -v+1d '+%Y-%m-%d %A')",
+      "Bash(python send_email.py)",
+      "Bash(git diff --cached --quiet)",
+      "Bash(tail -20)",
+      "Bash(python commit_archive.py)",
+      "Bash(python -c ' *)",
+      "Write(output/daily_brief_content.json)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(TZ=\"Asia/Kolkata\" date -v+1d \"+%Y-%m-%d %A\")",
+      "Write(output/daily_brief_content.json)",
+      "Write(output/**)",
+      "Read(output/**)"
+    ]
+  }
+}
