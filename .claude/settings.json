@@ -13,7 +13,11 @@
       "Read(data/**)",
       "Write(/Users/anisingh/GitHub/daily-school-brief/output/**)",
       "Read(/Users/anisingh/GitHub/daily-school-brief/output/**)",
-      "Read(/Users/anisingh/GitHub/daily-school-brief/data/**)"
+      "Read(/Users/anisingh/GitHub/daily-school-brief/data/**)",
+      "Bash(TZ='Asia/Kolkata' date -v+1d '+%Y-%m-%d %A')",
+      "Bash(python -c ' *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(TZ=\"Asia/Kolkata\" date -v+1d \"+%Y-%m-%d %A\")",
     ]
   }
 }
