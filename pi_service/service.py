@@ -158,3 +158,37 @@ def index() -> str:
             # can still be perfectly readable, so just skip the banner.
             pass
     return render_brief.render_brief_html(data, banner_html=banner_html)
+
+
+def main() -> None:
+    lock = threading.Lock()
+    portal_poller = PortalPoller()
+    whatsapp_poller = WhatsAppPoller()
+
+    def whatsapp_loop() -> None:
+        while True:
+            if whatsapp_poller.tick():
+                regenerate_brief(portal_poller, whatsapp_poller, lock)
+            time.sleep(WHATSAPP_POLL_SECONDS)
+
+    def portal_loop() -> None:
+        while True:
+            if portal_poller.tick():
+                regenerate_brief(portal_poller, whatsapp_poller, lock)
+            time.sleep(PORTAL_POLL_SECONDS)
+
+    def backstop_loop() -> None:
+        while True:
+            now = datetime.now(IST)
+            next_run = next_daily_backstop(now)
+            time.sleep((next_run - now).total_seconds())
+            regenerate_brief(portal_poller, whatsapp_poller, lock)
+
+    for target in (whatsapp_loop, portal_loop, backstop_loop):
+        threading.Thread(target=target, daemon=True).start()
+
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
+
+
+if __name__ == "__main__":
+    main()
