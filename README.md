@@ -9,7 +9,37 @@ See `docs/superpowers/specs/2026-09-05-daily-school-brief-design.md` for the
 full design and `docs/superpowers/plans/2026-09-05-daily-school-brief.md`
 for the implementation plan and current build status.
 
-## Components
+## `pi_service/` — always-on Raspberry Pi service
+
+The root-level project described below is triggered once a day by a
+scheduled cloud routine and delivers the brief by email. `pi_service/` is
+a separate, fully self-contained package that instead runs continuously
+on a home server (e.g. a Raspberry Pi), polling the school portal every
+60 minutes and WhatsApp every 10 minutes, regenerating the brief only
+when something new is found (or once/day as a backstop so date-relative
+fields like the swim/skate dress code stay correct), and serving the
+result on a LAN-only web page instead of email.
+
+It duplicates rather than shares code with the root-level scripts (see
+"Why not X" in the design doc below for the reasoning), so the two
+systems run independently — nothing here changes how the root-level flow
+works. See:
+- `docs/superpowers/specs/2026-09-09-always-on-service-design.md` — design
+- `docs/superpowers/plans/2026-09-09-always-on-service.md` — implementation
+  plan (includes the exact Raspberry Pi deployment steps: creating
+  `pi_service`'s own virtualenv, `.env`, and systemd unit)
+
+Quick start (see the plan's Task 12 for the full deployment walkthrough):
+```
+python3 -m venv pi_service/.venv
+pi_service/.venv/bin/pip install -r pi_service/requirements.txt
+cp pi_service/.env.example pi_service/.env   # then edit with real values
+pi_service/.venv/bin/python -m pi_service.service
+```
+Then visit `http://<host>:8765/` (port configurable via `pi_service/.env`'s
+`PORT`) from another device on the same home network.
+
+## Components (root-level, scheduled-cloud-agent + email flow)
 
 - **`scrape_udt.py`** — logs into the UDT eSchool parent portal, fetches
   the activity/messages page, parses each message (title, author, date,
