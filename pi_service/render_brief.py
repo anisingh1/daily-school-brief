@@ -1,0 +1,160 @@
+"""
+Renders the daily school brief's structured content into a polished,
+section-based HTML page - adapted from the root project's
+render_email.py to serve the pi_service web page instead of an email
+body. Takes the same structured dict shape produced by generate_brief.py
+(mirroring the original Claude Code skill's categorization output), so
+visual design is deterministic and consistent regardless of that day's
+content.
+
+Expected `data` keys: `date` (str), `warnings` (list[str]),
+`aviraj_highlight` (str | None), `classwork` (list[str]), `homework`
+(list[str]), `agenda` (list[str]), `dress_code` (str | None),
+`reminders` (list[str]).
+"""
+
+from html import escape
+
+
+def _as_list(value) -> list[str]:
+    """Normalize a list-typed field that may arrive as a bare string.
+
+    generate_brief.py's output is LLM-produced, so a single-item field
+    could plausibly come out as a bare string instead of a single-element
+    list. Iterating a bare string directly would silently produce one
+    <li> per character, so callers should always route list-typed fields
+    through this helper first.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
+_COLORS = {
+    "header_bg": "#4338CA",
+    "header_text": "#FFFFFF",
+    "page_bg": "#F3F4F6",
+    "card_bg": "#FFFFFF",
+    "text": "#1F2937",
+    "muted": "#6B7280",
+    "warning_bg": "#FEF3C7",
+    "warning_border": "#F59E0B",
+    "highlight_bg": "#FEF9C3",
+    "highlight_border": "#CA8A04",
+    "classwork_accent": "#0891B2",
+    "homework_accent": "#2563EB",
+    "agenda_accent": "#7C3AED",
+    "dress_accent": "#EA580C",
+    "reminders_accent": "#059669",
+}
+
+
+def _section(title: str, accent: str, items: list[str]) -> str:
+    items = [item for item in items if item and item.strip()]
+    if not items:
+        return ""
+    rows = "".join(
+        f'<li style="margin: 0 0 8px 0; line-height: 1.5;">{escape(item)}</li>'
+        for item in items
+    )
+    return f"""
+    <div style="margin: 0 0 24px 0; padding: 16px 20px; background: #FAFAFA;
+                border-left: 4px solid {accent}; border-radius: 4px;">
+      <h2 style="margin: 0 0 8px 0; font-size: 16px; color: {_COLORS['text']};">
+        {escape(title)}
+      </h2>
+      <ul style="margin: 0; padding-left: 20px;">{rows}</ul>
+    </div>
+    """
+
+
+def render_brief_html(data: dict, banner_html: str = "") -> str:
+    """Render `data` into a full HTML page.
+
+    `banner_html`, if given, is raw HTML inserted at the very top of the
+    page body (above the brief card) - used by the pi_service web page to
+    show a "last regeneration attempt failed" notice above the last
+    successfully-generated brief, without changing the default rendering
+    when left blank.
+    """
+    date = data.get("date", "")
+    warnings = [w for w in _as_list(data.get("warnings")) if w and w.strip()]
+    aviraj_highlight = data.get("aviraj_highlight")
+    aviraj_highlight = (
+        aviraj_highlight if aviraj_highlight and aviraj_highlight.strip() else None
+    )
+    classwork = _as_list(data.get("classwork"))
+    homework = _as_list(data.get("homework"))
+    agenda = _as_list(data.get("agenda"))
+    dress_code = data.get("dress_code")
+    dress_code = dress_code if dress_code and dress_code.strip() else None
+    reminders = _as_list(data.get("reminders"))
+
+    warning_html = ""
+    if warnings:
+        items = "".join(f"<li>{escape(w)}</li>" for w in warnings)
+        warning_html = f"""
+        <div style="margin: 0 0 20px 0; padding: 12px 16px; background: {_COLORS['warning_bg']};
+                    border-left: 4px solid {_COLORS['warning_border']}; border-radius: 4px;
+                    font-size: 14px; color: {_COLORS['text']};">
+          <strong>⚠️ Heads up:</strong>
+          <ul style="margin: 4px 0 0 0; padding-left: 20px;">{items}</ul>
+        </div>
+        """
+
+    highlight_html = ""
+    if aviraj_highlight:
+        highlight_html = f"""
+        <div style="margin: 0 0 20px 0; padding: 16px 20px; background: {_COLORS['highlight_bg']};
+                    border-left: 4px solid {_COLORS['highlight_border']}; border-radius: 4px;
+                    font-size: 15px; font-weight: 600; color: {_COLORS['text']};">
+          ⭐ {escape(aviraj_highlight)}
+        </div>
+        """
+
+    dress_html = ""
+    if dress_code:
+        dress_html = _section("👕 Dress Code", _COLORS["dress_accent"], [dress_code])
+
+    body = "".join([
+        warning_html,
+        highlight_html,
+        _section("🏫 Classwork", _COLORS["classwork_accent"], classwork),
+        _section("📚 Homework", _COLORS["homework_accent"], homework),
+        _section("📅 Tomorrow's Agenda", _COLORS["agenda_accent"], agenda),
+        dress_html,
+        _section("🔔 Other Reminders", _COLORS["reminders_accent"], reminders),
+    ])
+
+    if not body.strip():
+        body = f"""
+        <p style="font-size: 15px; color: {_COLORS['muted']};">
+          Nothing new from the school portal or WhatsApp group.
+        </p>
+        """
+
+    return f"""<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"></head>
+  <body style="margin: 0; padding: 24px; background: {_COLORS['page_bg']};
+               font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;">
+    {banner_html}
+    <div style="max-width: 600px; margin: 0 auto; background: {_COLORS['card_bg']};
+                border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+      <div style="background: {_COLORS['header_bg']}; color: {_COLORS['header_text']};
+                  padding: 20px 24px;">
+        <h1 style="margin: 0; font-size: 20px;">🎒 Daily School Brief</h1>
+        <p style="margin: 4px 0 0 0; font-size: 13px; opacity: 0.85;">{escape(date)}</p>
+      </div>
+      <div style="padding: 24px;">
+        {body}
+      </div>
+      <div style="padding: 16px 24px; background: {_COLORS['page_bg']};
+                  font-size: 12px; color: {_COLORS['muted']}; text-align: center;">
+        Generated automatically from the UDT eschool portal and WhatsApp group.
+      </div>
+    </div>
+  </body>
+</html>"""
