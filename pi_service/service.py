@@ -121,3 +121,24 @@ def regenerate_brief(portal_poller: PortalPoller, whatsapp_poller: WhatsAppPolle
             _write_last_attempt(succeeded=True, error=None)
         except Exception as e:  # noqa: BLE001 - keep serving the last good brief rather than crashing the service
             _write_last_attempt(succeeded=False, error=f"{type(e).__name__}: {e}")
+
+
+@app.route("/")
+def index() -> str:
+    if not CONTENT_PATH.exists():
+        return "<h1>Daily School Brief</h1><p>No brief generated yet.</p>"
+
+    data = json.loads(CONTENT_PATH.read_text())
+    banner_html = ""
+    if LAST_ATTEMPT_PATH.exists():
+        attempt = json.loads(LAST_ATTEMPT_PATH.read_text())
+        if not attempt["succeeded"]:
+            banner_html = (
+                '<div style="max-width: 600px; margin: 0 auto 16px auto; padding: 12px 16px; '
+                'background: #FEE2E2; border-left: 4px solid #DC2626; border-radius: 4px; '
+                'font-size: 14px;">'
+                f'Last regeneration attempt at {attempt["at"]} failed: {attempt["error"]}. '
+                "Showing the last successful brief below."
+                "</div>"
+            )
+    return render_brief.render_brief_html(data, banner_html=banner_html)

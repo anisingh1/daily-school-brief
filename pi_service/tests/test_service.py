@@ -148,3 +148,49 @@ def test_regenerate_brief_records_failure_without_touching_existing_content(tmp_
     attempt = json.loads((tmp_path / "last_attempt.json").read_text())
     assert attempt["succeeded"] is False
     assert "api down" in attempt["error"]
+
+
+def test_index_shows_placeholder_when_no_brief_yet(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "CONTENT_PATH", tmp_path / "daily_brief_content.json")
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", tmp_path / "last_attempt.json")
+    client = service.app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"No brief generated yet" in response.data
+
+
+def test_index_renders_latest_brief(tmp_path, monkeypatch):
+    content_path = tmp_path / "daily_brief_content.json"
+    content_path.write_text(json.dumps({
+        "date": "Tuesday, September 08, 2026", "warnings": [], "aviraj_highlight": None,
+        "classwork": [], "homework": ["Read pages 10-12"], "agenda": [],
+        "dress_code": None, "reminders": [],
+    }))
+    monkeypatch.setattr(service, "CONTENT_PATH", content_path)
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", tmp_path / "last_attempt.json")
+    client = service.app.test_client()
+
+    response = client.get("/")
+
+    assert b"Read pages 10-12" in response.data
+
+
+def test_index_shows_failure_banner_when_last_attempt_failed(tmp_path, monkeypatch):
+    content_path = tmp_path / "daily_brief_content.json"
+    content_path.write_text(json.dumps({
+        "date": "d", "warnings": [], "aviraj_highlight": None, "classwork": [],
+        "homework": [], "agenda": [], "dress_code": None, "reminders": [],
+    }))
+    last_attempt_path = tmp_path / "last_attempt.json"
+    last_attempt_path.write_text(json.dumps({
+        "succeeded": False, "at": "2026-09-07T19:30:00+05:30", "error": "api down",
+    }))
+    monkeypatch.setattr(service, "CONTENT_PATH", content_path)
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", last_attempt_path)
+    client = service.app.test_client()
+
+    response = client.get("/")
+
+    assert b"api down" in response.data
