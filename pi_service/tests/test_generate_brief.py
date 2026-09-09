@@ -113,3 +113,8 @@ def test_generate_brief_calls_anthropic_and_forces_date_and_warnings(monkeypatch
     assert result["aviraj_highlight"] == "Aviraj is presenting tomorrow"
     assert captured["kwargs"]["output_format"] is generate_brief.DailyBrief
     assert captured["kwargs"]["model"] == "claude-opus-5"
+
+    sent_content = captured["kwargs"]["messages"][0]["content"]
+    assert sent_content[-1]["type"] == "text"
+    assert "Flow of the Day" in sent_content[-1]["text"]  # confirms the envelope's message content reached the prompt
+    assert "Monday, September 07, 2026" in sent_content[-1]["text"]  # confirms build_prompt's date injection reached the API call

@@ -201,7 +201,7 @@ def generate_brief(envelope: dict, now: datetime | None = None) -> dict:
     content = _collect_attachment_blocks(envelope) + [{"type": "text", "text": prompt}]
     response = client.messages.parse(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=16000,
         messages=[{"role": "user", "content": content}],
         output_format=DailyBrief,
     )
