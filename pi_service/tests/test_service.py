@@ -77,3 +77,74 @@ def test_whatsapp_poller_records_error_and_keeps_last_good_messages(monkeypatch)
     assert poller.tick() is False
     assert poller.last_error == "RuntimeError: imap down"
     assert poller.last_messages == [{"sender": "A"}]
+
+
+import json
+import threading
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def test_next_daily_backstop_returns_today_when_before_time():
+    now = datetime(2026, 9, 7, 10, 0, tzinfo=IST)
+    assert service.next_daily_backstop(now) == datetime(2026, 9, 7, 19, 30, tzinfo=IST)
+
+
+def test_next_daily_backstop_returns_tomorrow_when_after_time():
+    now = datetime(2026, 9, 7, 20, 0, tzinfo=IST)
+    assert service.next_daily_backstop(now) == datetime(2026, 9, 8, 19, 30, tzinfo=IST)
+
+
+def test_next_daily_backstop_returns_tomorrow_when_exactly_at_time():
+    now = datetime(2026, 9, 7, 19, 30, tzinfo=IST)
+    assert service.next_daily_backstop(now) == datetime(2026, 9, 8, 19, 30, tzinfo=IST)
+
+
+def test_regenerate_brief_writes_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(service, "CONTENT_PATH", tmp_path / "daily_brief_content.json")
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", tmp_path / "last_attempt.json")
+    monkeypatch.setattr(service.portal_archive, "load_archive", lambda: [{"id": "1"}])
+    monkeypatch.setattr(
+        service.generate_brief, "generate_brief",
+        lambda envelope: {"date": "d", "warnings": [], "aviraj_highlight": None,
+                           "classwork": [], "homework": ["hw"], "agenda": [],
+                           "dress_code": None, "reminders": []},
+    )
+
+    portal_poller = service.PortalPoller()
+    whatsapp_poller = service.WhatsAppPoller()
+    whatsapp_poller.last_messages = [{"sender": "A"}]
+
+    service.regenerate_brief(portal_poller, whatsapp_poller, threading.Lock())
+
+    content = json.loads((tmp_path / "daily_brief_content.json").read_text())
+    assert content["homework"] == ["hw"]
+    attempt = json.loads((tmp_path / "last_attempt.json").read_text())
+    assert attempt["succeeded"] is True
+
+
+def test_regenerate_brief_records_failure_without_touching_existing_content(tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "OUTPUT_DIR", tmp_path)
+    content_path = tmp_path / "daily_brief_content.json"
+    content_path.write_text(json.dumps({"date": "yesterday"}))
+    monkeypatch.setattr(service, "CONTENT_PATH", content_path)
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", tmp_path / "last_attempt.json")
+    monkeypatch.setattr(service.portal_archive, "load_archive", lambda: [])
+
+    def failing_generate(envelope):
+        raise RuntimeError("api down")
+
+    monkeypatch.setattr(service.generate_brief, "generate_brief", failing_generate)
+
+    portal_poller = service.PortalPoller()
+    whatsapp_poller = service.WhatsAppPoller()
+
+    service.regenerate_brief(portal_poller, whatsapp_poller, threading.Lock())
+
+    assert json.loads(content_path.read_text()) == {"date": "yesterday"}
+    attempt = json.loads((tmp_path / "last_attempt.json").read_text())
+    assert attempt["succeeded"] is False
+    assert "api down" in attempt["error"]

@@ -83,3 +83,41 @@ class WhatsAppPoller:
         if previous is None:
             return False
         return messages != previous
+
+
+def next_daily_backstop(now: datetime, hour: int = 19, minute: int = 30) -> datetime:
+    """Next occurrence of `hour:minute` at or after `now`, in `now`'s own
+    timezone. Returns tomorrow's occurrence if `now` is already at or past
+    today's."""
+    candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _write_last_attempt(succeeded: bool, error: str | None) -> None:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    LAST_ATTEMPT_PATH.write_text(json.dumps(
+        {"succeeded": succeeded, "at": datetime.now(IST).isoformat(), "error": error},
+        indent=2,
+    ))
+
+
+def regenerate_brief(portal_poller: PortalPoller, whatsapp_poller: WhatsAppPoller, lock: threading.Lock) -> None:
+    """Builds the current envelope from each poller's latest known state,
+    calls the LLM, and writes the content JSON - or, on failure, leaves
+    the last successfully-generated content untouched and records the
+    failure for the web page (which re-renders HTML from this JSON on
+    every request) to surface instead."""
+    with lock:
+        envelope = {
+            "portal": {"messages": portal_archive.load_archive(), "error": portal_poller.last_error},
+            "whatsapp": {"messages": whatsapp_poller.last_messages or [], "error": whatsapp_poller.last_error},
+        }
+        try:
+            data = generate_brief.generate_brief(envelope)
+            OUTPUT_DIR.mkdir(exist_ok=True)
+            CONTENT_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+            _write_last_attempt(succeeded=True, error=None)
+        except Exception as e:  # noqa: BLE001 - keep serving the last good brief rather than crashing the service
+            _write_last_attempt(succeeded=False, error=f"{type(e).__name__}: {e}")
