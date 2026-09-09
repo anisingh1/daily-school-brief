@@ -11,6 +11,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -123,22 +124,37 @@ def regenerate_brief(portal_poller: PortalPoller, whatsapp_poller: WhatsAppPolle
             _write_last_attempt(succeeded=False, error=f"{type(e).__name__}: {e}")
 
 
+_NO_BRIEF_PLACEHOLDER = "<h1>Daily School Brief</h1><p>No brief generated yet.</p>"
+
+
 @app.route("/")
 def index() -> str:
     if not CONTENT_PATH.exists():
-        return "<h1>Daily School Brief</h1><p>No brief generated yet.</p>"
+        return _NO_BRIEF_PLACEHOLDER
 
-    data = json.loads(CONTENT_PATH.read_text())
+    try:
+        data = json.loads(CONTENT_PATH.read_text())
+    except json.JSONDecodeError:
+        # Content file may be mid-write (regenerate_brief's writes are not
+        # atomic and this route holds no lock coordinating with it) -
+        # degrade to the placeholder rather than a 500.
+        return _NO_BRIEF_PLACEHOLDER
+
     banner_html = ""
     if LAST_ATTEMPT_PATH.exists():
-        attempt = json.loads(LAST_ATTEMPT_PATH.read_text())
-        if not attempt["succeeded"]:
-            banner_html = (
-                '<div style="max-width: 600px; margin: 0 auto 16px auto; padding: 12px 16px; '
-                'background: #FEE2E2; border-left: 4px solid #DC2626; border-radius: 4px; '
-                'font-size: 14px;">'
-                f'Last regeneration attempt at {attempt["at"]} failed: {attempt["error"]}. '
-                "Showing the last successful brief below."
-                "</div>"
-            )
+        try:
+            attempt = json.loads(LAST_ATTEMPT_PATH.read_text())
+            if not attempt["succeeded"]:
+                banner_html = (
+                    '<div style="max-width: 600px; margin: 0 auto 16px auto; padding: 12px 16px; '
+                    'background: #FEE2E2; border-left: 4px solid #DC2626; border-radius: 4px; '
+                    'font-size: 14px;">'
+                    f'Last regeneration attempt at {escape(attempt["at"])} failed: {escape(attempt["error"])}. '
+                    "Showing the last successful brief below."
+                    "</div>"
+                )
+        except (json.JSONDecodeError, KeyError):
+            # Sidecar file may be mid-write too; the brief content itself
+            # can still be perfectly readable, so just skip the banner.
+            pass
     return render_brief.render_brief_html(data, banner_html=banner_html)

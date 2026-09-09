@@ -194,3 +194,57 @@ def test_index_shows_failure_banner_when_last_attempt_failed(tmp_path, monkeypat
     response = client.get("/")
 
     assert b"api down" in response.data
+
+
+def test_index_escapes_unsafe_content_in_failure_banner(tmp_path, monkeypatch):
+    content_path = tmp_path / "daily_brief_content.json"
+    content_path.write_text(json.dumps({
+        "date": "d", "warnings": [], "aviraj_highlight": None, "classwork": [],
+        "homework": [], "agenda": [], "dress_code": None, "reminders": [],
+    }))
+    last_attempt_path = tmp_path / "last_attempt.json"
+    last_attempt_path.write_text(json.dumps({
+        "succeeded": False, "at": "2026-09-07T19:30:00+05:30", "error": "<script>bad</script>",
+    }))
+    monkeypatch.setattr(service, "CONTENT_PATH", content_path)
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", last_attempt_path)
+    client = service.app.test_client()
+
+    response = client.get("/")
+    body = response.data.decode()
+
+    assert "<script>" not in body
+    assert "&lt;script&gt;" in body
+
+
+def test_index_shows_placeholder_when_content_json_is_malformed(tmp_path, monkeypatch):
+    content_path = tmp_path / "daily_brief_content.json"
+    content_path.write_text('{"date": "d", "homework": ["truncated mid-wr')
+    monkeypatch.setattr(service, "CONTENT_PATH", content_path)
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", tmp_path / "last_attempt.json")
+    client = service.app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"No brief generated yet" in response.data
+
+
+def test_index_skips_banner_when_last_attempt_json_is_malformed(tmp_path, monkeypatch):
+    content_path = tmp_path / "daily_brief_content.json"
+    content_path.write_text(json.dumps({
+        "date": "Tuesday, September 08, 2026", "warnings": [], "aviraj_highlight": None,
+        "classwork": [], "homework": ["Read pages 10-12"], "agenda": [],
+        "dress_code": None, "reminders": [],
+    }))
+    last_attempt_path = tmp_path / "last_attempt.json"
+    last_attempt_path.write_text('{"succeeded": false, "at": "2026-09-07T19:30:00+05:30", "error": "trunc')
+    monkeypatch.setattr(service, "CONTENT_PATH", content_path)
+    monkeypatch.setattr(service, "LAST_ATTEMPT_PATH", last_attempt_path)
+    client = service.app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"Read pages 10-12" in response.data
+    assert b"failed" not in response.data
