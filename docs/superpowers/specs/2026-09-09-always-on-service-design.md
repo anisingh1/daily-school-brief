@@ -70,10 +70,10 @@ X" for why.
 
 ```
 repo root (unchanged)                    pi_service/ (new, self-contained)
-├── scrape_udt.py         still used     ├── scrape_udt.py        (adapted copy)
-├── fetch_whatsapp.py     by the old     ├── fetch_whatsapp.py    (adapted copy,
-├── cutoff.py             scheduled      ├── cutoff.py             persisted
-├── portal_archive.py     cloud routine  ├── portal_archive.py     IMAP cursor)
+├── scrape_udt.py         still used     ├── scrape_udt.py        (copy, unmodified)
+├── fetch_whatsapp.py     by the old     ├── fetch_whatsapp.py    (copy, unmodified)
+├── cutoff.py             scheduled      ├── cutoff.py             (copy, unmodified)
+├── portal_archive.py     cloud routine  ├── portal_archive.py     (copy, import fixed)
 ├── daily_brief.py        + email, as    ├── service.py           (new)
 ├── send_email.py         today          ├── generate_brief.py    (new)
 ├── render_email.py                      ├── render_brief.py      (new, adapted
@@ -85,7 +85,8 @@ repo root (unchanged)                    pi_service/ (new, self-contained)
 [School Portal]                          [Gmail inbox]
       │                                        │
       │ pi_service/scrape_udt.py,              │ pi_service/fetch_whatsapp.py,
-      │ portal_archive cursor                  │ IMAP cursor
+      │ portal_archive cursor                  │ full 3-month refetch each time,
+      │ (incremental fetch)                    │ new-content detected by diffing
       │ polled every 60 min                    │ polled every 10 min
       │                                        │
       └───────────────┬────────────────────────┘
@@ -128,29 +129,38 @@ routine uses. Nothing under `pi_service/` imports from or writes to the
 root-level scripts or their state, and nothing at the root imports from
 `pi_service/`.
 
-### 1. Portal fetcher — `pi_service/scrape_udt.py`, `pi_service/portal_archive.py` (copied, adapted)
+### 1. Portal fetcher — `pi_service/scrape_udt.py`, `pi_service/portal_archive.py` (copied)
 
-Copied from the root-level versions. Logic is otherwise unchanged: logs
-in, scrapes, dedups by message id into `pi_service/data/portal_messages.json`,
-tracks a cursor in `pi_service/data/last_run.json`. Invoked once per
-60-minute poll. The 2-month pruning behavior is unchanged.
+`scrape_udt.py` is copied byte-for-byte, no changes. `portal_archive.py`
+is copied with one required one-line fix: its `from cutoff import
+month_anchor` is a bare, unqualified import, which would otherwise
+resolve to whichever `cutoff` module sys.path finds first (risking a
+silent dependency on the *root's* `cutoff.py` instead of `pi_service`'s
+own copy, defeating the point of duplicating it). Changed to `from
+pi_service.cutoff import month_anchor`. Everything else is unchanged:
+logs in, scrapes, dedups by message id into
+`pi_service/data/portal_messages.json`, tracks a cursor in
+`pi_service/data/last_run.json`. Invoked once per 60-minute poll. The
+2-month pruning behavior is unchanged.
 
-### 2. WhatsApp fetcher — `pi_service/fetch_whatsapp.py` (copied, gains a persisted cursor)
+### 2. WhatsApp fetcher — `pi_service/fetch_whatsapp.py` (byte-for-byte copy, unmodified)
 
-Copied from the root-level version, which always re-scans from
-`cutoff.month_anchor()` on every run — fine at once-a-day cadence, but
-would mean re-fetching/re-filtering the whole month's IMAP mailbox every
-10 minutes. The copy adds a persisted cursor,
-`pi_service/data/whatsapp_last_run.json` (`{"last_run": "<isoformat>"}`),
-mirroring the portal's pattern:
+Copied from the root-level version with **no changes at all** — every
+path it touches is already derived from `Path(__file__).parent`, so the
+copy automatically reads/writes under `pi_service/data/` without edits.
 
-- First run (no cursor file yet): fall back to `cutoff.month_anchor()`
-  (copied from `pi_service/cutoff.py`), same as today's root-level script.
-- Subsequent runs: fetch only messages since the cursor, advance it after
-  a successful fetch.
-
-This cursor addition only changes the `pi_service/` copy — the root-level
-`fetch_whatsapp.py` used by the existing flow is untouched.
+No cursor is added here. A cursor would only speed up the *fetch*, but
+the *brief* still needs the full relevant history every time it
+regenerates (e.g. to carry forward homework from a few days ago) — the
+same problem the portal's archive was built to solve. Unlike the portal,
+there's no login-cost reason to make the WhatsApp fetch incremental: it's
+an IMAP `SEARCH` against the user's own Gmail inbox, which comfortably
+handles being called every 10 minutes at full-window cost. So every poll
+just calls `fetch_recent_whatsapp_messages(cutoff=month_anchor(months_back=3))`
+— identical to what `daily_brief.py` already does once a day — and
+"is anything new" is detected separately (see component 3) by comparing
+that poll's fetched result to the previous poll's, not by a persisted
+cursor.
 
 ### 3. `pi_service/service.py` (new) — the always-on entrypoint
 
@@ -162,6 +172,16 @@ plain background loop per task (a thread per interval, each sleeping until
 its next run time) — no extra scheduling dependency needed for three fixed
 intervals, and it matches the rest of the codebase's plain-synchronous
 style (no existing script uses `asyncio` or a scheduling library).
+
+Since the WhatsApp fetch has no persisted cursor (see component 2),
+`service.py` keeps the previous poll's fetched WhatsApp message list
+in memory (module-level state, reset on service restart) and compares
+each new poll's result against it (by message identity — timestamp +
+sender + text) to decide whether anything changed. A restart re-fetches
+and treats the first post-restart poll as a fresh baseline (no
+regeneration fires on that comparison alone) — acceptable since the
+daily backstop still guarantees a regeneration within 24 hours even if a
+restart happens to swallow one change notification.
 
 ### 4. `pi_service/generate_brief.py` (new) — replaces the Claude Code skill
 
@@ -226,9 +246,11 @@ is ever also run as a local service in the future.
 
 ## Data flow / trigger logic
 
-- **WhatsApp loop (10 min)**: fetch new messages since the IMAP cursor →
-  if any found, merge/save, advance cursor, trigger `regenerate_brief()`.
-  If none found, no-op (no LLM call).
+- **WhatsApp loop (10 min)**: fetch the full 3-month window → compare
+  against the previous poll's fetched result → if different, trigger
+  `regenerate_brief()` (passing this poll's full fetched list, so the
+  brief always has complete context, not just what's new). If unchanged,
+  no-op (no LLM call).
 - **Portal loop (60 min)**: fetch since the portal cursor → if the merge
   into the archive adds anything new, trigger `regenerate_brief()`.
 - **Daily backstop (~7:30pm IST, once/day)**: always triggers
@@ -252,7 +274,7 @@ is ever also run as a local service in the future.
 
 ## Testing approach
 
-- Unit tests for the new WhatsApp IMAP cursor logic and for
+- Unit tests for the WhatsApp new-content diffing logic and for
   `generate_brief.py`'s input-envelope/prompt construction, mocking the
   Anthropic API call — following the existing patterns in `tests/`.
 - Manual verification on the actual Pi: systemd service starts on boot,
@@ -273,8 +295,9 @@ is ever also run as a local service in the future.
   latest brief, matching how the tool is used today (one brief at a time).
 - No database — local JSON files on the Pi's disk under `pi_service/`,
   mirroring today's shapes (`portal_messages.json`, `last_run.json`,
-  `whatsapp_last_run.json`, `daily_brief_content.json`), but stored
-  separately from the root-level copies.
+  `daily_brief_content.json`), but stored separately from the root-level
+  copies. WhatsApp has no on-disk archive or cursor, matching today's
+  design (its fetch is always a stateless full-window re-scan).
 - No changes to the existing scheduled-cloud-agent + email flow, and no
   migration/cutover step — retiring it (if the user chooses to, once the
   Pi service is proven out) is explicitly out of scope for this work.
