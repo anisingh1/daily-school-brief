@@ -72,3 +72,44 @@ def test_collect_attachment_blocks_encodes_existing_pdf(tmp_path):
     assert blocks[0]["source"]["media_type"] == "application/pdf"
     decoded = base64.standard_b64decode(blocks[0]["source"]["data"])
     assert decoded == b"%PDF-1.4 fake pdf bytes"
+
+
+def test_generate_brief_calls_anthropic_and_forces_date_and_warnings(monkeypatch):
+    now = datetime(2026, 9, 7, 20, 0, tzinfo=IST)
+    envelope = _envelope(portal_messages=[{"id": "1", "title": "Flow of the Day", "attachments": []}])
+    captured = {}
+
+    class FakeParsedOutput:
+        def model_dump(self):
+            return {
+                "date": "wrong-date-the-model-should-not-control-this",
+                "warnings": ["model should not control this either"],
+                "aviraj_highlight": "Aviraj is presenting tomorrow",
+                "classwork": ["Chapter 3"],
+                "homework": ["Worksheet 4"],
+                "agenda": [],
+                "dress_code": None,
+                "reminders": [],
+            }
+
+    class FakeResponse:
+        parsed_output = FakeParsedOutput()
+
+    class FakeMessages:
+        def parse(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return FakeResponse()
+
+    class FakeClient:
+        messages = FakeMessages()
+
+    monkeypatch.setattr(generate_brief.anthropic, "Anthropic", lambda: FakeClient())
+
+    result = generate_brief.generate_brief(envelope, now=now)
+
+    assert result["date"] == "Tuesday, September 08, 2026"
+    assert result["warnings"] == []
+    assert result["homework"] == ["Worksheet 4"]
+    assert result["aviraj_highlight"] == "Aviraj is presenting tomorrow"
+    assert captured["kwargs"]["output_format"] is generate_brief.DailyBrief
+    assert captured["kwargs"]["model"] == "claude-opus-5"
